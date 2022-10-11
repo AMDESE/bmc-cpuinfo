@@ -41,7 +41,7 @@ extern "C" {
 #define EAX_MASK_MAGIC_1 0xf
 #define EAX_MASK_MAGIC_2 0xff
 #define EAX_MASK_MAGIC_3 0x10
-#define APML_SLEEP 10000
+#define APML_SLEEP 10
 
 // Platform Type
 constexpr auto ONYX_SLT     = 61;   //0x3D
@@ -120,7 +120,7 @@ bool CpuInfo::connect_apml_get_family_model_step(uint8_t soc_num )
       ret = esmi_oob_cpuid(soc_num, core_id, &eax, &ebx, &ecx, &edx);
       if(ret != 0)
       {
-        sleep(10);
+        sleep(APML_SLEEP);
         retry++;
       }
       else
