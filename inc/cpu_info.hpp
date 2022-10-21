@@ -2,6 +2,9 @@
 #include <unistd.h>
 #include <fstream>
 #include <iostream>
+#include <sstream>
+#include <map>
+#include<iomanip>
 #include <phosphor-logging/elog-errors.hpp>
 #include <xyz/openbmc_project/Collection/DeleteAll/server.hpp>
 #include <xyz/openbmc_project/Common/error.hpp>
@@ -48,6 +51,7 @@ namespace StateServer = sdbusplus::xyz::openbmc_project::State::server;
 
 enum dbus_interface { CPU_INTERFACE, ASSET_INTERFACE } ;
 static const char *enum_str[] = { "xyz.openbmc_project.Inventory.Item.Cpu", "xyz.openbmc_project.Inventory.Decorator.Asset" };
+static const std::map<int, std::string> months_map = {{1,"M"}, {2,"N"}, {3,"O"}, {4,"P"}, {5,"Q"}, {6,"R"}, {7,"S"}, {8,"T"}, {9,"U"}, {10,"V"}, {11,"W"}, {12,"X"}};
 
 struct CpuInfo
 {
@@ -96,7 +100,7 @@ struct CpuInfo
                 }
         })
     {
-       phosphor::logging::log<phosphor::logging::level::INFO>("cpu service stated...");
+       sd_journal_print(LOG_INFO, "cpu service stated... \n");
        getPlatformID();
        collect_cpu_information();
     }
@@ -110,7 +114,7 @@ struct CpuInfo
     sdbusplus::bus::match_t propertiesChangedCpuInfoValue;
     sdbusplus::bus::match_t propertiesChangedSignalCurrentHostState;
     std::string get_interface(uint8_t enum_val);
-    int num_of_proc = 1;
+    uint8_t num_of_proc = 1;
     unsigned int board_id = 0;
 
     // oob-lib functions
@@ -127,5 +131,11 @@ struct CpuInfo
     void set_cpu_string_value(uint8_t soc_num, char *value, std::string property_name, uint8_t enum_val);
     void set_cpu_int_value(uint8_t soc_num, uint32_t value, std::string property_name, uint8_t enum_val);
     void set_cpu_int16_value(uint8_t soc_num, uint16_t value, std::string property_name, uint8_t enum_val);
+
+    //decode ppin function
+    void decode_PPIN(uint8_t soc_num, uint64_t data);
+    void decode_lotstring(char* ppinstr, std::string& );
+    void decode_datemonth_unitlot(char* ppinstr, std::string& datemonthlotstr);
+
 
 };

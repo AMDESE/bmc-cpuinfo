@@ -3,7 +3,6 @@ Description=CPU Information
 Wants=mapper-wait@-xyz-openbmc_project-inventory.service
 After=mapper-wait@-xyz-openbmc_project-inventory.service
 After=xyz.openbmc_project.Control.Host.Power_cap.service
-ConditionPathExists=/tmp/apml_init_complete
 
 [Service]
 ExecStart=/usr/bin/cpu-info

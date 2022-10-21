@@ -41,7 +41,23 @@ extern "C" {
 #define EAX_MASK_MAGIC_1 0xf
 #define EAX_MASK_MAGIC_2 0xff
 #define EAX_MASK_MAGIC_3 0x10
-#define APML_SLEEP 10
+#define APML_SLEEP 10000
+#define MUX_SLEEP 5
+
+// PPIN logic
+#define LOWER_PINBITS 8
+#define MASKNO_14BITS 0x00003FFF
+#define DEV_LENGTH 4
+#define MASKNO_MON_YEAR 0x001FC000
+#define DATECODE_SHIFT 14
+#define MONTH_VAL 10
+#define LOTNUM_SHIFT 21
+#define LOTNUM_LENGHT 7
+#define MAX_ALPHA_NUM 37
+#define MAX_ALPHA_LENGTH 27
+#define ALPHA_CHAR_CONVER_VAL 64
+#define DIGIT_CONVER_VAL 21
+#define HEX "0x"
 
 // Platform Type
 constexpr auto ONYX_SLT     = 61;   //0x3D
@@ -87,7 +103,7 @@ uint32_t edx;
 void CpuInfo::collect_cpu_information()
 {
 
-  for(uint8_t soc_num = 0; soc_num < num_of_proc; soc_num++)
+  for(uint8_t soc_num = 0; soc_num < num_of_proc;  soc_num++)
   {
      if (connect_apml_get_family_model_step(soc_num))
      {
@@ -114,45 +130,56 @@ bool CpuInfo::connect_apml_get_family_model_step(uint8_t soc_num )
     edx = 0;
     eax = EAX_VAL;
     ecx = 0;
-
-    while(retry < MAX_RETRY)
+    try
     {
-      ret = esmi_oob_cpuid(soc_num, core_id, &eax, &ebx, &ecx, &edx);
+      while(retry < MAX_RETRY)
+      {
+        ret = esmi_oob_cpuid(soc_num, core_id, &eax, &ebx, &ecx, &edx);
+        if(ret != 0)
+        {
+          sleep(MUX_SLEEP);
+          retry++;
+        }
+        else
+        {
+          break;
+        }
+      }//end of retry
+
       if(ret != 0)
       {
-        sleep(APML_SLEEP);
-        retry++;
+        sd_journal_print(LOG_ERR, "Error : Unable to get the CPU info from APML \n" );
       }
       else
       {
-        break;
+        char cpuid[CMD_BUFF_LEN];
+        family_id = ((eax >> EAX_DATA_LEN_2) & EAX_MASK_MAGIC_1) + ((eax >> EAX_DATA_LEN_4) & EAX_MASK_MAGIC_2);
+        sprintf(cpuid, "%x (%d)", family_id, family_id);
+        set_cpu_string_value(soc_num, cpuid, "EffectiveFamily", CPU_INTERFACE);
+        model_id = ((eax >> EAX_DATA_LEN_3) & EAX_MASK_MAGIC_1) * EAX_MASK_MAGIC_3 + ((eax >> EAX_DATA_LEN_1) & EAX_MASK_MAGIC_1);
+        sprintf(cpuid, "%x (%d)", model_id, model_id);
+        set_cpu_string_value(soc_num, cpuid, "EffectiveModel", CPU_INTERFACE);
+        step_id = eax & EAX_MASK_MAGIC_1 ;
+        sprintf(cpuid, "%x (%d)", step_id, step_id);
+        set_cpu_string_value(soc_num, cpuid, "Step", CPU_INTERFACE);
+        sprintf(cpuid, "%d", soc_num);
+        set_cpu_string_value(soc_num, cpuid, "Socket", CPU_INTERFACE);
+
+        return true;
       }
     }
-    if(ret != 0)
+    catch (std::exception& e)
     {
-      sd_journal_print(LOG_ERR, "apml API -unable to get the CPU value \n");
+       sd_journal_print(LOG_ERR, "Error getting CPU Model, Family and Step value \n");
+       return false;
     }
-    else
-    {
-      char cpuid[CMD_BUFF_LEN];
-      family_id = ((eax >> EAX_DATA_LEN_2) & EAX_MASK_MAGIC_1) + ((eax >> EAX_DATA_LEN_4) & EAX_MASK_MAGIC_2);
-      sprintf(cpuid, "%x (%d)", family_id, family_id);
-      set_cpu_string_value(soc_num, cpuid, "EffectiveFamily", CPU_INTERFACE);
-      model_id = ((eax >> EAX_DATA_LEN_3) & EAX_MASK_MAGIC_1) * EAX_MASK_MAGIC_3 + ((eax >> EAX_DATA_LEN_1) & EAX_MASK_MAGIC_1);
-      sprintf(cpuid, "%x (%d)", model_id, model_id);
-      set_cpu_string_value(soc_num, cpuid, "EffectiveModel", CPU_INTERFACE);
-      step_id = eax & EAX_MASK_MAGIC_1 ;
-      sprintf(cpuid, "%x (%d)", step_id, step_id);
-      set_cpu_string_value(soc_num, cpuid, "Step", CPU_INTERFACE);
-      sprintf(cpuid, "%d", soc_num);
-      set_cpu_string_value(soc_num, cpuid, "Socket", CPU_INTERFACE);
-      return true;
-    }
+
     return false;
 }
 void CpuInfo::set_general_info(uint8_t soc_num)
 {
     set_cpu_string_value(soc_num, "AMD", "Manufacturer", ASSET_INTERFACE);
+    set_cpu_string_value(soc_num, "AuthenticAMD", "VendorId", CPU_INTERFACE);
 
 }
 //Get processor threads per Core and Socket
@@ -168,16 +195,17 @@ void CpuInfo::get_threads_per_core_and_soc(uint8_t soc_num)
           return;
       }
       set_cpu_int16_value(soc_num, threads_per_core, "CoreCount", CPU_INTERFACE);
+      usleep(APML_SLEEP);
       ret = esmi_get_threads_per_socket(soc_num, &threads_per_soc);
       if (ret) {
-          sd_journal_print(LOG_ERR, " esmi_get_threads_per_socket call failed \n");
+          sd_journal_print(LOG_ERR, "esmi_get_threads_per_socket call failed \n");
           return;
       }
       set_cpu_int16_value(soc_num, threads_per_soc, "ThreadCount", CPU_INTERFACE);
     }
     catch (std::exception& e)
     {
-       sd_journal_print(LOG_ERR, "Error getting CPU Base Freq value \n");
+       sd_journal_print(LOG_ERR, "Error getting Thread and Socket \n");
        return ;
     }
 }
@@ -217,10 +245,13 @@ void CpuInfo::get_ppin_fuse(uint8_t soc_num)
           data = buffer;
           // Read higher 32 bit PPIN data
           ret = esmi_oob_read_mailbox(soc_num, READ_PPIN_FUSE, HI_WORD_REG, &buffer);
-        if (!ret)
-         {
-           data |= ((uint64_t)buffer << 32);
-         }
+          if (!ret)
+          {
+            data |= ((uint64_t)buffer << 32);
+            //now decode PPIN to get SN
+            decode_PPIN(soc_num, data);
+
+          }
       }
    }
    catch (std::exception& e)
@@ -228,7 +259,6 @@ void CpuInfo::get_ppin_fuse(uint8_t soc_num)
       sd_journal_print(LOG_ERR, "Error getting PPN value \n");
       return ;
    }
-   sd_journal_print(LOG_DEBUG,"| PPIN Fuse | 0x%-64llx |\n", data);
 }
 void CpuInfo::get_microcode_rev(uint8_t soc_num)
 {
@@ -239,9 +269,10 @@ void CpuInfo::get_microcode_rev(uint8_t soc_num)
         sd_journal_print(LOG_ERR,"Failed to read ucode revision\n");
         return;
     }
-    sd_journal_print(LOG_ERR,"|ucode revision  | 0x%-32x |\n", ucode);
+    sd_journal_print(LOG_INFO,"|ucode revision  | 0x%-32x |\n", ucode);
+    //set the Dbus value
     char microid[CMD_BUFF_LEN];
-    sprintf(microid, "0x%-32x",ucode);
+    sprintf(microid, "0x%x",ucode);
     set_cpu_string_value(soc_num, microid, "Microcode", CPU_INTERFACE);
 }
 //get the platform ID
@@ -303,7 +334,7 @@ std::string CpuInfo::get_interface(uint8_t enum_val )
 //Set the CPU DBus value
 void CpuInfo::set_cpu_string_value(uint8_t soc_num, char *value, std::string property_name, uint8_t enum_val)
 {
-    sd_journal_print(LOG_DEBUG,"Set the DBUS Property of %s \n", property_name.c_str());
+    sd_journal_print(LOG_INFO, "Set the DBUS Property of %s \n", property_name.c_str());
     sdbusplus::bus::bus bus = sdbusplus::bus::new_default();
     boost::system::error_code ec;
     boost::asio::io_context io;
@@ -341,7 +372,7 @@ void CpuInfo::set_cpu_string_value(uint8_t soc_num, char *value, std::string pro
 }
 void CpuInfo::set_cpu_int_value(uint8_t soc_num, uint32_t value, std::string property_name, uint8_t enum_val)
 {
-    sd_journal_print(LOG_DEBUG,"Set the DBUS Property of %s \n", property_name.c_str());
+    sd_journal_print(LOG_INFO,"Set the DBUS Property of %s \n", property_name.c_str());
     sdbusplus::bus::bus bus = sdbusplus::bus::new_default();
     boost::system::error_code ec;
     boost::asio::io_context io;
@@ -379,7 +410,7 @@ void CpuInfo::set_cpu_int_value(uint8_t soc_num, uint32_t value, std::string pro
 }
 void CpuInfo::set_cpu_int16_value(uint8_t soc_num, uint16_t value, std::string property_name, uint8_t enum_val)
 {
-    sd_journal_print(LOG_DEBUG,"cpu-info - Set the DBUS Property of %s \n", property_name.c_str());
+    sd_journal_print(LOG_INFO,"Set the DBUS Property of %s \n", property_name.c_str());
     sdbusplus::bus::bus bus = sdbusplus::bus::new_default();
     boost::system::error_code ec;
     boost::asio::io_context io;
@@ -415,3 +446,126 @@ void CpuInfo::set_cpu_int16_value(uint8_t soc_num, uint16_t value, std::string p
           std::variant<uint16_t>(value));
     }
 }
+//function to decode Marking Month - last Digit of making Year and Unit # in lot
+void CpuInfo::decode_datemonth_unitlot(char* ppinstr, std::string& datemonthlotstr)
+{
+    std::string ppin_str(ppinstr);
+    size_t len = strlen(ppinstr);
+    // get lower PPIN
+    int offset = len - LOWER_PINBITS;
+    std::string lower32ppinstr = ppin_str.substr(offset, LOWER_PINBITS);
+    lower32ppinstr = HEX + lower32ppinstr;
+
+    //get upper PPIN
+    std::string upper32ppinstr = ppin_str.substr (0, (len - LOWER_PINBITS));
+    upper32ppinstr = HEX + upper32ppinstr;
+
+    //convert hex string to actual number
+    unsigned int upper32ppin;
+    std::stringstream ss1;
+    ss1 << std::hex << upper32ppinstr;
+    ss1 >> upper32ppin;
+
+    unsigned int lower32ppin;
+    std::stringstream ss2;
+    ss2 << std::hex << lower32ppinstr;
+    ss2 >> lower32ppin;
+
+    //Bits 0-13 are Dev Number
+    //mask out all 14 bits
+    int devnum = (lower32ppin & MASKNO_14BITS);
+    //add leading zeros to the string if less then 4 digit
+    std::string devnumstr = std::to_string(devnum);
+    std::ostringstream ss3;
+    ss3 << std::setw(DEV_LENGTH) << std::setfill('0') << devnumstr;
+    devnumstr = ss3.str();
+
+    //Bits 14-20 are Month/Year
+    int datecode = (lower32ppin & MASKNO_MON_YEAR);
+        datecode = (datecode >> DATECODE_SHIFT);
+
+    int month = (datecode / MONTH_VAL);
+        month = month + 1;
+
+    int year = datecode  % MONTH_VAL;
+
+    std::string monthstr;
+    for (auto itr = months_map.find(month); itr != months_map.end(); itr++)
+    {
+      monthstr = itr->second;
+    }
+
+    datemonthlotstr = monthstr + std::to_string(year) + devnumstr;
+}
+//decode marked lot number char length is 7 -Fuse/mak lot #
+void CpuInfo::decode_lotstring(char* ppinstr, std::string& markedlotstr)
+{
+    std::string ppin_str(ppinstr);
+    uint64_t full64ppin;
+    uint64_t markedlot;
+    uint64_t converter_num;
+    uint64_t decodechar_num;
+
+    //convert hex string to actual number
+    std::string ppin_hexstr = HEX + ppin_str;
+    std::stringstream ss;
+    ss << std::hex << ppin_hexstr;
+    ss >> full64ppin;
+
+    //Bits 21-57 are Marked Lot Number
+    markedlot = full64ppin >> LOTNUM_SHIFT;
+
+    converter_num = markedlot;
+    char currentchar[CMD_BUFF_LEN];
+    char lotstring[CMD_BUFF_LEN];
+
+    //Now convert Marked Lot through Alpha Numeric 37 decoding
+    //marked lot is 7 char string
+    for (int i=0; i < LOTNUM_LENGHT; i++)
+    {
+       decodechar_num = converter_num % MAX_ALPHA_NUM;
+       converter_num = converter_num / MAX_ALPHA_NUM;
+       if (decodechar_num < MAX_ALPHA_LENGTH)
+       {
+           decodechar_num = decodechar_num + ALPHA_CHAR_CONVER_VAL;
+           currentchar[i] = decodechar_num;
+       }
+       else
+       {
+           decodechar_num = decodechar_num + DIGIT_CONVER_VAL;
+           currentchar[i] = decodechar_num;
+       }
+       lotstring[i] = currentchar[i];
+    }
+    markedlotstr = lotstring;
+}
+//decode PPIN to get SN
+void CpuInfo::decode_PPIN(uint8_t soc_num, uint64_t data)
+{
+    char ppinstr[CMD_BUFF_LEN];
+    std::string markedlotstr;
+    std::string datemonthlotstr;
+    std::string serialnumstr;
+
+    sprintf(ppinstr, "%llx", data);
+    sd_journal_print(LOG_INFO, "PPIN Fuse : %s \n", ppinstr);
+
+    decode_lotstring(ppinstr, markedlotstr);
+    sd_journal_print(LOG_INFO, "Mark Lot string # %s \n", markedlotstr.c_str());
+
+    decode_datemonth_unitlot(ppinstr, datemonthlotstr);
+    sd_journal_print(LOG_INFO, "Month:Year:#Unitlot %s \n", datemonthlotstr.c_str());
+
+    // Serial Number = lotstring + month + year + devnum
+    serialnumstr = markedlotstr + datemonthlotstr;
+
+    //now convert string to Char buffer to set in DBus
+    char serialnum_buffer[serialnumstr.length() + 1];
+    strcpy(serialnum_buffer, serialnumstr.c_str());
+
+    //set the Dbus property
+    set_cpu_string_value(soc_num, serialnum_buffer, "SerialNumber", ASSET_INTERFACE);
+
+    return;
+}
+

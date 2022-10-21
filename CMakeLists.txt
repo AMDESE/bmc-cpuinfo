@@ -13,15 +13,15 @@ include(GNUInstallDirs)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/inc)
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
-set(DBUS_OBJECT_NAME "/xyz/openbmc_project/inventory/system/processor/P0")
+set(DBUS_OBJECT_NAME "/xyz/openbmc_project/inventory/system/processor")
 set(DBUS_INTF_NAME "xyz.openbmc_project.Inventory.Item")
 
 add_definitions(-DDBUS_OBJECT_NAME="/${DBUS_OBJECT_NAME}")
 add_definitions(-DDBUS_INTF_NAME="${DBUS_INTF_NAME}")
-set(SRC_FILES src/cpu_info.cpp 
-    src/main.cpp )
+set(SRC_FILES cpu_info.cpp
+    main.cpp )
 set ( SERVICE_FILES
-    service_files/xyz.openbmc_project.Inventory.Item.Cpu_info.service )
+    xyz.openbmc_project.Inventory.Item.Cpu_info.service )
 
 # import sdbusplus
 find_package(PkgConfig REQUIRED)
