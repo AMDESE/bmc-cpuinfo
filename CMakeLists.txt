@@ -18,10 +18,10 @@ set(DBUS_INTF_NAME "xyz.openbmc_project.Inventory.Item")
 
 add_definitions(-DDBUS_OBJECT_NAME="/${DBUS_OBJECT_NAME}")
 add_definitions(-DDBUS_INTF_NAME="${DBUS_INTF_NAME}")
-set(SRC_FILES cpu_info.cpp
-    main.cpp )
+set(SRC_FILES src/cpu_info.cpp
+    src/main.cpp )
 set ( SERVICE_FILES
-    xyz.openbmc_project.Inventory.Item.Cpu_info.service )
+    service_files/xyz.openbmc_project.Inventory.Item.Cpu_info.service )
 
 # import sdbusplus
 find_package(PkgConfig REQUIRED)
