@@ -124,6 +124,8 @@ bool CpuInfo::connect_apml_get_family_model_step(uint8_t soc_num )
     uint32_t family_id;
     uint32_t model_id;
     uint32_t step_id;
+    uint32_t ext_family;
+    uint32_t ext_model;
     int core_id = 0;
     uint16_t freq;
     ebx = 0;
@@ -153,12 +155,23 @@ bool CpuInfo::connect_apml_get_family_model_step(uint8_t soc_num )
       else
       {
         char cpuid[CMD_BUFF_LEN];
-        family_id = ((eax >> EAX_DATA_LEN_2) & EAX_MASK_MAGIC_1) + ((eax >> EAX_DATA_LEN_4) & EAX_MASK_MAGIC_2);
+
+        ext_family = ((eax >> EAX_DATA_LEN_4) & EAX_MASK_MAGIC_2);
+        sprintf(cpuid, "%x (%d)", ext_family, ext_family);
+        set_cpu_string_value(soc_num, cpuid, "EffectiveFamily", CPU_INTERFACE);
+
+        family_id = ((eax >> EAX_DATA_LEN_2) & EAX_MASK_MAGIC_1) + ext_family;
         sprintf(cpuid, "%x (%d)", family_id, family_id);
         set_cpu_string_value(soc_num, cpuid, "Family", CPU_INTERFACE);
-        model_id = ((eax >> EAX_DATA_LEN_3) & EAX_MASK_MAGIC_1) * EAX_MASK_MAGIC_3 + ((eax >> EAX_DATA_LEN_1) & EAX_MASK_MAGIC_1);
+
+        ext_model = ((eax >> EAX_DATA_LEN_3) & EAX_MASK_MAGIC_1);
+        sprintf(cpuid, "%x (%d)", ext_model, ext_model);
+        set_cpu_string_value(soc_num, cpuid, "EffectiveModel", CPU_INTERFACE);
+
+        model_id = ext_model * EAX_MASK_MAGIC_3 + ((eax >> EAX_DATA_LEN_1) & EAX_MASK_MAGIC_1);
         sprintf(cpuid, "%x (%d)", model_id, model_id);
         set_cpu_string_value(soc_num, cpuid, "Model", CPU_INTERFACE);
+
         step_id = eax & EAX_MASK_MAGIC_1 ;
         sprintf(cpuid, "%x (%d)", step_id, step_id);
         set_cpu_string_value(soc_num, cpuid, "Step", CPU_INTERFACE);
