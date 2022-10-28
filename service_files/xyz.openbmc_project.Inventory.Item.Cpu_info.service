@@ -1,0 +1,16 @@
+[Unit]
+Description=CPU Information
+Wants=mapper-wait@-xyz-openbmc_project-inventory.service
+After=mapper-wait@-xyz-openbmc_project-inventory.service
+After=xyz.openbmc_project.Control.Host.Power_cap.service
+
+[Service]
+ExecStart=/usr/bin/cpu-info
+Restart=always
+RestartSec=3
+SyslogIdentifier=cpu-info
+Type=simple
+
+[Install]
+WantedBy=multi-user.target
+
