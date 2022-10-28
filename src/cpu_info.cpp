@@ -22,7 +22,7 @@ extern "C" {
 #include "esmi_rmi.h"
 #include "esmi_cpuid_msr.h"
 #include "esmi_tsi.h"
-#include "esmi_mailbox_int.h"
+#include "esmi_mailbox_nda.h"
 }
 
 #define COMMAND_BOARD_ID    ("/sbin/fw_printenv -n board_id")
