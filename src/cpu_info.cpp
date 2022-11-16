@@ -52,7 +52,7 @@ extern "C" {
 #define DATECODE_SHIFT 14
 #define MONTH_VAL 10
 #define LOTNUM_SHIFT 21
-#define LOTNUM_LENGHT 7
+#define LOTNUM_LENGTH 7
 #define MAX_ALPHA_NUM 37
 #define MAX_ALPHA_LENGTH 27
 #define ALPHA_CHAR_CONVER_VAL 64
@@ -204,11 +204,11 @@ void CpuInfo::get_threads_per_core_and_soc(uint8_t soc_num)
     try
     {
       ret = esmi_get_threads_per_socket(soc_num, &threads_per_soc);
-      if (ret) 
+      if (ret)
       {
         sd_journal_print(LOG_ERR, "esmi_get_threads_per_socket call failed \n");
       }
-      else 
+      else
       {
         set_cpu_int16_value(soc_num, threads_per_soc, "ThreadCount", CPU_INTERFACE);
         isthreadcall_pass = true;
@@ -222,11 +222,11 @@ void CpuInfo::get_threads_per_core_and_soc(uint8_t soc_num)
       }
       else
       {
-	if(isthreadcall_pass)
-	{
-	  uint32_t TotalCores = threads_per_soc / threads_per_core; 
+        if(isthreadcall_pass)
+        {
+          uint32_t TotalCores = threads_per_soc / threads_per_core;
           set_cpu_int16_value(soc_num, TotalCores, "CoreCount", CPU_INTERFACE);
-	}
+        }
       }
 
     }
@@ -516,10 +516,10 @@ void CpuInfo::decode_datemonth_unitlot(char* ppinstr, std::string& datemonthlots
 
     int year = datecode  % MONTH_VAL;
 
-    std::string monthstr;
-    for (auto itr = months_map.find(month); itr != months_map.end(); itr++)
+    std::string monthstr = "";
+    if(months_map.find(month) != months_map.end())
     {
-      monthstr = itr->second;
+       monthstr = months_map.find(month)->second;
     }
 
     datemonthlotstr = monthstr + std::to_string(year) + devnumstr;
@@ -544,11 +544,10 @@ void CpuInfo::decode_lotstring(char* ppinstr, std::string& markedlotstr)
 
     converter_num = markedlot;
     char currentchar[CMD_BUFF_LEN];
-    char lotstring[CMD_BUFF_LEN];
 
     //Now convert Marked Lot through Alpha Numeric 37 decoding
     //marked lot is 7 char string
-    for (int i=0; i < LOTNUM_LENGHT; i++)
+    for (int i=0; i < LOTNUM_LENGTH; i++)
     {
        decodechar_num = converter_num % MAX_ALPHA_NUM;
        converter_num = converter_num / MAX_ALPHA_NUM;
@@ -562,9 +561,17 @@ void CpuInfo::decode_lotstring(char* ppinstr, std::string& markedlotstr)
            decodechar_num = decodechar_num + DIGIT_CONVER_VAL;
            currentchar[i] = decodechar_num;
        }
-       lotstring[i] = currentchar[i];
     }
-    markedlotstr = lotstring;
+    // reverse the char buffer to get lot numbe 
+    int i, len, temp;
+    len = strlen(currentchar);
+    for(i = 0;i < len/2;i++)
+    {
+        temp = currentchar[i];
+        currentchar[i] = currentchar[len - i - 1];
+        currentchar[len - i - 1] = temp;
+    }
+    markedlotstr = currentchar;
 }
 //decode PPIN to get SN
 void CpuInfo::decode_PPIN(uint8_t soc_num, uint64_t data)
@@ -574,9 +581,12 @@ void CpuInfo::decode_PPIN(uint8_t soc_num, uint64_t data)
     std::string datemonthlotstr;
     std::string serialnumstr;
 
-    sprintf(ppinstr, "%llx", data);
+    sprintf(ppinstr, "0x%llx", data);
     sd_journal_print(LOG_INFO, "PPIN Fuse : %s \n", ppinstr);
+    //set PPIN to Dbus for internal use
+    set_cpu_string_value(soc_num, ppinstr, "PPIN", CPU_INTERFACE);
 
+    sprintf(ppinstr, "0%llx", data);
     decode_lotstring(ppinstr, markedlotstr);
     sd_journal_print(LOG_INFO, "Mark Lot string # %s \n", markedlotstr.c_str());
 
@@ -595,4 +605,3 @@ void CpuInfo::decode_PPIN(uint8_t soc_num, uint64_t data)
 
     return;
 }
-
