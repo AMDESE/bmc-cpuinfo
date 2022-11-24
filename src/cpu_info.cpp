@@ -58,6 +58,7 @@ extern "C" {
 #define ALPHA_CHAR_CONVER_VAL 64
 #define DIGIT_CONVER_VAL 21
 #define HEX "0x"
+#define LENGTH_DIV 2
 
 // Platform Type
 constexpr auto ONYX_SLT     = 61;   //0x3D
@@ -228,7 +229,6 @@ void CpuInfo::get_threads_per_core_and_soc(uint8_t soc_num)
           set_cpu_int16_value(soc_num, TotalCores, "CoreCount", CPU_INTERFACE);
         }
       }
-
     }
     catch (std::exception& e)
     {
@@ -277,7 +277,6 @@ void CpuInfo::get_ppin_fuse(uint8_t soc_num)
             data |= ((uint64_t)buffer << 32);
             //now decode PPIN to get SN
             decode_PPIN(soc_num, data);
-
           }
       }
    }
@@ -515,7 +514,6 @@ void CpuInfo::decode_datemonth_unitlot(char* ppinstr, std::string& datemonthlots
         month = month + 1;
 
     int year = datecode  % MONTH_VAL;
-
     std::string monthstr = "";
     if(months_map.find(month) != months_map.end())
     {
@@ -547,7 +545,7 @@ void CpuInfo::decode_lotstring(char* ppinstr, std::string& markedlotstr)
 
     //Now convert Marked Lot through Alpha Numeric 37 decoding
     //marked lot is 7 char string
-    for (int i=0; i < LOTNUM_LENGTH; i++)
+    for (int i = 0; i < LOTNUM_LENGTH; i++)
     {
        decodechar_num = converter_num % MAX_ALPHA_NUM;
        converter_num = converter_num / MAX_ALPHA_NUM;
@@ -562,14 +560,15 @@ void CpuInfo::decode_lotstring(char* ppinstr, std::string& markedlotstr)
            currentchar[i] = decodechar_num;
        }
     }
-    // reverse the char buffer to get lot numbe 
-    int i, len, temp;
+    //reverse the char buffer to get lot number
+    int len, temp, itrlen;
     len = strlen(currentchar);
-    for(i = 0;i < len/2;i++)
+    itrlen = len / LENGTH_DIV;
+    for(int i = 0; i < itrlen; i++)
     {
-        temp = currentchar[i];
-        currentchar[i] = currentchar[len - i - 1];
-        currentchar[len - i - 1] = temp;
+       temp = currentchar[i];
+       currentchar[i] = currentchar[len - i - 1];
+       currentchar[len - i - 1] = temp;
     }
     markedlotstr = currentchar;
 }
@@ -577,23 +576,23 @@ void CpuInfo::decode_lotstring(char* ppinstr, std::string& markedlotstr)
 void CpuInfo::decode_PPIN(uint8_t soc_num, uint64_t data)
 {
     char ppinstr[CMD_BUFF_LEN];
+    char setppinstr[CMD_BUFF_LEN];
     std::string markedlotstr;
     std::string datemonthlotstr;
     std::string serialnumstr;
 
-    sprintf(ppinstr, "0x%llx", data);
-    sd_journal_print(LOG_INFO, "PPIN Fuse : %s \n", ppinstr);
-    //set PPIN to Dbus for internal use
-    set_cpu_string_value(soc_num, ppinstr, "PPIN", CPU_INTERFACE);
+    sprintf(setppinstr, "0x%llx", data);
+    sd_journal_print(LOG_INFO, "PPIN Fuse : %s \n", setppinstr);
+    set_cpu_string_value(soc_num, setppinstr, "PPIN", CPU_INTERFACE);
 
-    sprintf(ppinstr, "0%llx", data);
+    sprintf(ppinstr, "%llx", data);
     decode_lotstring(ppinstr, markedlotstr);
     sd_journal_print(LOG_INFO, "Mark Lot string # %s \n", markedlotstr.c_str());
 
     decode_datemonth_unitlot(ppinstr, datemonthlotstr);
     sd_journal_print(LOG_INFO, "Month:Year:#Unitlot %s \n", datemonthlotstr.c_str());
 
-    // Serial Number = lotstring + month + year + devnum
+    //serial Number = lotstring + month + year + devnum
     serialnumstr = markedlotstr + datemonthlotstr;
 
     //now convert string to Char buffer to set in DBus
