@@ -109,9 +109,9 @@ void CpuInfo::collect_cpu_information()
      if (connect_apml_get_family_model_step(soc_num))
      {
         set_general_info(soc_num);
-        get_threads_per_core_and_soc(soc_num);
         get_cpu_base_freq(soc_num);
         get_ppin_fuse(soc_num);
+        get_threads_per_core_and_soc(soc_num);
         get_microcode_rev(soc_num);
      }
   }
@@ -263,10 +263,25 @@ void CpuInfo::get_ppin_fuse(uint8_t soc_num)
     oob_status_t ret;
     uint64_t data = 0;
     char cpuid[CMD_BUFF_LEN];
+    int retry = 0;
+    //APML read mail box takes time to init, hence added retry
     try
     {
-      // Read lower 32 bit PPIN data
-      ret = esmi_oob_read_mailbox(soc_num, READ_PPIN_FUSE, LO_WORD_REG, &buffer);
+      while(retry < MAX_RETRY)
+      {
+        // Read lower 32 bit PPIN data$
+        ret = esmi_oob_read_mailbox(soc_num, READ_PPIN_FUSE, LO_WORD_REG, &buffer);
+        if(ret != 0)
+        {
+          sleep(MUX_SLEEP);
+          retry++;
+        }
+        else
+        {
+          break;
+        }
+      }//end of retry
+
       if (!ret)
       {
           data = buffer;
@@ -278,6 +293,10 @@ void CpuInfo::get_ppin_fuse(uint8_t soc_num)
             //now decode PPIN to get SN
             decode_PPIN(soc_num, data);
           }
+      }
+      else
+      {
+          sd_journal_print(LOG_ERR, "Error reading lower 32 PPN value \n");
       }
    }
    catch (std::exception& e)
@@ -358,7 +377,7 @@ std::string CpuInfo::get_interface(uint8_t enum_val )
     return enum_str[enum_val];
 }
 //Set the CPU DBus value
-void CpuInfo::set_cpu_string_value(uint8_t soc_num, char *value, std::string property_name, uint8_t enum_val)
+void CpuInfo::set_cpu_string_value(uint8_t soc_num, std::string value, std::string property_name, uint8_t enum_val)
 {
     sd_journal_print(LOG_INFO, "Set the DBUS Property of %s \n", property_name.c_str());
     sdbusplus::bus::bus bus = sdbusplus::bus::new_default();
@@ -585,7 +604,7 @@ void CpuInfo::decode_PPIN(uint8_t soc_num, uint64_t data)
     sd_journal_print(LOG_INFO, "PPIN Fuse : %s \n", setppinstr);
     set_cpu_string_value(soc_num, setppinstr, "PPIN", CPU_INTERFACE);
 
-    sprintf(ppinstr, "%llx", data);
+    sprintf(ppinstr, "0%llx", data);
     decode_lotstring(ppinstr, markedlotstr);
     sd_journal_print(LOG_INFO, "Mark Lot string # %s \n", markedlotstr.c_str());
 

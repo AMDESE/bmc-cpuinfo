@@ -128,7 +128,7 @@ struct CpuInfo
     void get_microcode_rev(uint8_t soc_num);
 
     //DBUS functions
-    void set_cpu_string_value(uint8_t soc_num, char *value, std::string property_name, uint8_t enum_val);
+    void set_cpu_string_value(uint8_t soc_num, std::string value, std::string property_name, uint8_t enum_val);
     void set_cpu_int_value(uint8_t soc_num, uint32_t value, std::string property_name, uint8_t enum_val);
     void set_cpu_int16_value(uint8_t soc_num, uint16_t value, std::string property_name, uint8_t enum_val);
 
