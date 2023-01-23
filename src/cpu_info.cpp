@@ -25,8 +25,8 @@ extern "C" {
 #include "esmi_mailbox_nda.h"
 }
 
-#define COMMAND_BOARD_ID    ("/sbin/fw_printenv -n board_id")
-#define COMMAND_LEN         3
+#define COMMAND_NUM_OF_CPU    ("/sbin/fw_printenv -n num_of_cpu")
+#define COMMAND_LEN         (3)
 #define MAX_RETRY           20
 
 #define CMD_BUFF_LEN     256
@@ -321,49 +321,23 @@ void CpuInfo::get_microcode_rev(uint8_t soc_num)
     set_cpu_string_value(soc_num, microid, "Microcode", CPU_INTERFACE);
 }
 //get the platform ID
-bool CpuInfo::getPlatformID()
+bool CpuInfo::getNumberOfCpu()
 {
     FILE *pf;
     char data[COMMAND_LEN];
     std::stringstream ss;
     // Setup pipe for reading and execute to get u-boot environment
-    pf = popen(COMMAND_BOARD_ID,"r");
+    pf = popen(COMMAND_NUM_OF_CPU,"r");
     if(pf > 0)
     {   // no error
         if (fgets(data, COMMAND_LEN , pf) != NULL)
         {
             ss << std::hex << (std::string)data;
-            ss >> board_id;
+            ss >> num_of_proc;
+	    sd_journal_print(LOG_DEBUG, "Number of Cpu %d\n", num_of_proc);
         }
         pclose(pf);
-        if ( board_id > 0 || board_id < 0xFF )
-        {
-            switch (board_id)
-            {
-                case ONYX_SLT:
-                case ONYX_1 ... ONYX_3:
-                case ONYX_FR4:
-                case RUBY_1 ... RUBY_3:
-                case SHALE_1:
-                case SHALE_2:
-                case SHALE_3:
-                case CINNABAR:
-                case SUNSTONE_1:
-                case SUNSTONE_2:
-                    num_of_proc = 1;
-                    break;
-                case QUARTZ_DAP:
-                case QUARTZ_1 ... QUARTZ_3:
-                case QUARTZ_FR4:
-                case TITANITE_1 ... TITANITE_6:
-                    num_of_proc = 2;
-                    break;
-                default:
-                    num_of_proc = 1;
-                    break;
-            }//switch
-            return true;
-        }
+        return true;
     }
     else
     {

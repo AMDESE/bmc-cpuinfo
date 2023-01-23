@@ -101,7 +101,7 @@ struct CpuInfo
         })
     {
        sd_journal_print(LOG_INFO, "cpu service stated... \n");
-       getPlatformID();
+       getNumberOfCpu();
        collect_cpu_information();
     }
     ~CpuInfo()
@@ -115,10 +115,10 @@ struct CpuInfo
     sdbusplus::bus::match_t propertiesChangedSignalCurrentHostState;
     std::string get_interface(uint8_t enum_val);
     uint8_t num_of_proc = 1;
-    unsigned int board_id = 0;
+    unsigned int num_of_cpu = 0;
 
     // oob-lib functions
-    bool getPlatformID();
+    bool getNumberOfCpu();
     void collect_cpu_information();
     void set_general_info(uint8_t soc_num);
     bool connect_apml_get_family_model_step(uint8_t soc_num);
