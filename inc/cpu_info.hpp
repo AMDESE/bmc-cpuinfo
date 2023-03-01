@@ -12,6 +12,21 @@
 #include <xyz/openbmc_project/Inventory/Item/Cpu/server.hpp>
 #include <xyz/openbmc_project/Inventory/Item/server.hpp>
 
+#define CPUID_Fn8000002       (0x80000002)
+#define CPUID_Fn8000003       (0x80000003)
+#define CPUID_Fn8000004       (0x80000004)
+
+#define MASK_BYTE_2           (0xFF00)
+#define MASK_BYTE_3           (0xFF0000)
+#define MASK_BYTE_4           (0xFF000000)
+#define MASK_TWO_BYTES        (0xFF)
+
+#define SHIFT_24              (24)
+#define SHIFT_16              (16)
+#define SHIFT_8               (8)
+#define OPN_LENGTH            (47)
+#define PARTNUMBER   "PartNumber"
+
 const static constexpr char *CpuInfoName =
     "CpuInfo";
 const static constexpr char *CpuInfoEnableName =
@@ -137,5 +152,9 @@ struct CpuInfo
     void decode_lotstring(char* ppinstr, std::string& );
     void decode_datemonth_unitlot(char* ppinstr, std::string& datemonthlotstr);
 
+    //OPN functions
+    void get_opn(uint8_t soc_num);
+    bool read_register(uint8_t soc_num, uint32_t thread_ind, uint32_t cpuid_fn, uint32_t cpuid_extd_fn, uint32_t *eax_value, uint32_t *ebx_value, uint32_t *ecx_value, uint32_t *edx_value);
+    u_int8_t get_reg_offset_conv(uint32_t reg, uint32_t offset, uint32_t flag);
 
 };
