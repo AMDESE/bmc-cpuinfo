@@ -113,6 +113,7 @@ void CpuInfo::collect_cpu_information()
         get_ppin_fuse(soc_num);
         get_threads_per_core_and_soc(soc_num);
         get_microcode_rev(soc_num);
+        get_opn(soc_num);
      }
   }
 
@@ -189,6 +190,159 @@ bool CpuInfo::connect_apml_get_family_model_step(uint8_t soc_num )
     }
 
     return false;
+}
+// Get the OPN
+void CpuInfo::get_opn(uint8_t soc_num)
+{
+    int32_t cpuid_fn = 1;
+    uint32_t cpuid_extd_fn = 0;
+    uint32_t thread_ind = 0;
+    uint32_t eax_value, ebx_value, ecx_value, edx_value;
+    u_int8_t write_opn_data[OPN_LENGTH] = {0};
+    char OpnChar [OPN_LENGTH] = {0};
+
+    cpuid_fn = CPUID_Fn8000002;
+    if(read_register(soc_num, thread_ind, cpuid_fn, cpuid_extd_fn, &eax_value, &ebx_value, &ecx_value, &edx_value))
+    {
+        //eax
+        write_opn_data[0] = (eax_value & MASK_TWO_BYTES);
+        write_opn_data[1] = get_reg_offset_conv(eax_value, SHIFT_8,  MASK_BYTE_2);
+        write_opn_data[2] = get_reg_offset_conv(eax_value, SHIFT_16, MASK_BYTE_3);
+        write_opn_data[3] = get_reg_offset_conv(eax_value, SHIFT_24, MASK_BYTE_4);
+        //ebx
+        write_opn_data[4] = (ebx_value & MASK_TWO_BYTES);
+        write_opn_data[5] = get_reg_offset_conv(ebx_value, SHIFT_8,  MASK_BYTE_2);
+        write_opn_data[6] = get_reg_offset_conv(ebx_value, SHIFT_16, MASK_BYTE_3);
+        write_opn_data[7] = get_reg_offset_conv(ebx_value, SHIFT_24, MASK_BYTE_4);
+        //ecx
+        write_opn_data[8] = (ecx_value & MASK_TWO_BYTES);
+        write_opn_data[9] = get_reg_offset_conv(ecx_value, SHIFT_8,  MASK_BYTE_2);
+        write_opn_data[10] = get_reg_offset_conv(ecx_value, SHIFT_16, MASK_BYTE_3);
+        write_opn_data[11] = get_reg_offset_conv(ecx_value, SHIFT_24, MASK_BYTE_4);
+        //edx
+        write_opn_data[12] = (edx_value & MASK_TWO_BYTES);
+        write_opn_data[13] = get_reg_offset_conv(edx_value, SHIFT_8,  MASK_BYTE_2);
+        write_opn_data[14] = get_reg_offset_conv(edx_value, SHIFT_16, MASK_BYTE_3);
+        write_opn_data[15] = get_reg_offset_conv(edx_value, SHIFT_24, MASK_BYTE_4);
+    }
+    else
+    {
+        sd_journal_print(LOG_ERR, "Failed to read 0x80000002 register value \n");
+        return;
+    }
+
+    cpuid_fn = CPUID_Fn8000003;
+    if(read_register(soc_num, thread_ind, cpuid_fn, cpuid_extd_fn, &eax_value, &ebx_value, &ecx_value, &edx_value))
+    {
+        //eax
+        write_opn_data[16] = (eax_value & MASK_TWO_BYTES);
+        write_opn_data[17] = get_reg_offset_conv(eax_value, SHIFT_8,  MASK_BYTE_2);
+        write_opn_data[18] = get_reg_offset_conv(eax_value, SHIFT_16, MASK_BYTE_3);
+        write_opn_data[19] = get_reg_offset_conv(eax_value, SHIFT_24, MASK_BYTE_4);
+        //ebx
+        write_opn_data[20] = (ebx_value & MASK_TWO_BYTES);
+        write_opn_data[21] = get_reg_offset_conv(ebx_value, SHIFT_8,  MASK_BYTE_2);
+        write_opn_data[22] = get_reg_offset_conv(ebx_value, SHIFT_16, MASK_BYTE_3);
+        write_opn_data[23] = get_reg_offset_conv(ebx_value, SHIFT_24, MASK_BYTE_4);
+        //ecx
+        write_opn_data[24] = (ecx_value & MASK_TWO_BYTES);
+        write_opn_data[25] = get_reg_offset_conv(ecx_value, SHIFT_8,  MASK_BYTE_2);
+        write_opn_data[26] = get_reg_offset_conv(ecx_value, SHIFT_16, MASK_BYTE_3);
+        write_opn_data[27] = get_reg_offset_conv(ecx_value, SHIFT_24, MASK_BYTE_4);
+        //edx
+        write_opn_data[28] = (edx_value & MASK_TWO_BYTES);
+        write_opn_data[29] = get_reg_offset_conv(edx_value, SHIFT_8,  MASK_BYTE_2);
+        write_opn_data[30] = get_reg_offset_conv(edx_value, SHIFT_16, MASK_BYTE_3);
+        write_opn_data[31] = get_reg_offset_conv(edx_value, SHIFT_24, MASK_BYTE_4);
+    }
+    else
+    {
+        sd_journal_print(LOG_ERR, "Failed to read 0x80000003 register value \n");
+        return;
+    }
+
+    cpuid_fn = CPUID_Fn8000004;
+    if(read_register(soc_num, thread_ind, cpuid_fn, cpuid_extd_fn, &eax_value, &ebx_value, &ecx_value, &edx_value))
+    {
+        write_opn_data[32] = (eax_value & MASK_TWO_BYTES);
+        write_opn_data[33] = get_reg_offset_conv(eax_value, SHIFT_8,  MASK_BYTE_2);
+        write_opn_data[34] = get_reg_offset_conv(eax_value, SHIFT_16, MASK_BYTE_3);
+        write_opn_data[35] = get_reg_offset_conv(eax_value, SHIFT_24, MASK_BYTE_4);
+        //ebx
+        write_opn_data[36] = (ebx_value & MASK_TWO_BYTES);
+        write_opn_data[37] = get_reg_offset_conv(ebx_value, SHIFT_8,  MASK_BYTE_2);
+        write_opn_data[38] = get_reg_offset_conv(ebx_value, SHIFT_16, MASK_BYTE_3);
+        write_opn_data[39] = get_reg_offset_conv(ebx_value, SHIFT_24, MASK_BYTE_4);
+        //ecx
+        write_opn_data[40] = (ecx_value & MASK_TWO_BYTES);
+        write_opn_data[41] = get_reg_offset_conv(ecx_value, SHIFT_8,  MASK_BYTE_2);
+        write_opn_data[42] = get_reg_offset_conv(ecx_value, SHIFT_16, MASK_BYTE_3);
+        write_opn_data[43] = get_reg_offset_conv(ecx_value, SHIFT_24, MASK_BYTE_4);
+        //edx
+        write_opn_data[44] = (edx_value & MASK_TWO_BYTES);
+        write_opn_data[45] = get_reg_offset_conv(edx_value, SHIFT_8,  MASK_BYTE_2);
+        write_opn_data[46] = get_reg_offset_conv(edx_value, SHIFT_16, MASK_BYTE_3);
+    }
+    else
+    {
+        sd_journal_print(LOG_ERR, "Failed to read 0x80000004 register value \n");
+        return;
+    }
+
+    //convert hex to ascii
+    for (int i = 0; i < OPN_LENGTH; i++)
+    {
+       OpnChar[i] = (char) write_opn_data[i];
+    }
+
+    //convert char to opn string
+    std::string opn_str(OpnChar);
+    sd_journal_print(LOG_ERR, "OPN string # %s \n", opn_str.c_str());
+
+    //set the value in DBUS
+    set_cpu_string_value(soc_num, opn_str, PARTNUMBER, ASSET_INTERFACE);
+
+}
+// Read register thru apml lib
+bool CpuInfo::read_register(uint8_t soc_num, uint32_t thread_ind, uint32_t cpuid_fn, uint32_t cpuid_extd_fn, uint32_t *eax_value, uint32_t *ebx_value, uint32_t *ecx_value, uint32_t *edx_value)
+{
+    bool ret = false;
+    if(OOB_SUCCESS == esmi_oob_cpuid_eax(soc_num, thread_ind, cpuid_fn, cpuid_extd_fn, eax_value))
+    {
+       if(OOB_SUCCESS == esmi_oob_cpuid_ebx(soc_num, thread_ind, cpuid_fn, cpuid_extd_fn, ebx_value))
+       {
+          if(OOB_SUCCESS == esmi_oob_cpuid_ecx(soc_num, thread_ind, cpuid_fn, cpuid_extd_fn, ecx_value))
+          {
+             if(OOB_SUCCESS == esmi_oob_cpuid_edx(soc_num, thread_ind, cpuid_fn, cpuid_extd_fn, edx_value))
+             {
+                ret = true;
+             }
+             else
+             {
+                sd_journal_print(LOG_ERR, "Error reading register eax \n");
+             }
+          }
+          else
+          {
+             sd_journal_print(LOG_ERR, "Error reading register ecx \n");
+          }
+       }
+       else
+       {
+          sd_journal_print(LOG_ERR, "Error reading register ebx \n");
+       }
+    }
+    else
+    {
+       sd_journal_print(LOG_ERR, "Error reading register eax \n");
+    }
+
+    return ret;
+}
+//get byte value
+u_int8_t  CpuInfo::get_reg_offset_conv(uint32_t reg, uint32_t offset, uint32_t flag)
+{
+	return ((reg & flag ) >> offset);
 }
 void CpuInfo::set_general_info(uint8_t soc_num)
 {
