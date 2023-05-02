@@ -110,14 +110,20 @@ struct CpuInfo
                         StateServer::Host::HostState currentHostState =
                             StateServer::Host::convertHostStateFromString(
                                 std::get<std::string>(valPropMap->second));
-                     //TO DO - in case if we need to check any DBus Property event
+
+                        if (currentHostState != StateServer::Host::HostState::Off)
+                        {
+                            sd_journal_print(LOG_INFO, "cpu service started after bmc or host reboot... \n");
+                            if (getNumberOfCpu())
+                            {
+                               collect_cpu_information();
+                            }
+                        }
                     }
                 }
         })
     {
-       sd_journal_print(LOG_INFO, "cpu service stated... \n");
-       getNumberOfCpu();
-       collect_cpu_information();
+       sd_journal_print(LOG_DEBUG, "cpu service start... \n");
     }
     ~CpuInfo()
     {
