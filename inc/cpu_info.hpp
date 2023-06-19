@@ -141,6 +141,7 @@ struct CpuInfo
     // oob-lib functions
     bool getNumberOfCpu();
     void collect_cpu_information();
+    int  getGPIOValue(const std::string& name);
     void set_general_info(uint8_t soc_num);
     bool connect_apml_get_family_model_step(uint8_t soc_num);
     void get_threads_per_core_and_soc(uint8_t soc_num);
@@ -152,6 +153,7 @@ struct CpuInfo
     void set_cpu_string_value(uint8_t soc_num, std::string value, std::string property_name, uint8_t enum_val);
     void set_cpu_int_value(uint8_t soc_num, uint32_t value, std::string property_name, uint8_t enum_val);
     void set_cpu_int16_value(uint8_t soc_num, uint16_t value, std::string property_name, uint8_t enum_val);
+    void set_cpu_bool_value(uint8_t soc_num, bool value, std::string property_name, uint8_t enum_val);
 
     //decode ppin function
     void decode_PPIN(uint8_t soc_num, uint64_t data);
