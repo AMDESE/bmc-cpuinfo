@@ -60,33 +60,9 @@ extern "C" {
 #define HEX "0x"
 #define LENGTH_DIV 2
 
-// Platform Type
-constexpr auto ONYX_SLT     = 61;   //0x3D
-constexpr auto ONYX_1       = 64;   //0x40
-constexpr auto ONYX_2       = 65;   //0x41
-constexpr auto ONYX_3       = 66;   //0x42
-constexpr auto ONYX_FR4     = 82;   //0x52
-constexpr auto QUARTZ_DAP   = 62;   //0x3E
-constexpr auto QUARTZ_1     = 67;   //0x43
-constexpr auto QUARTZ_2     = 68;   //0x44
-constexpr auto QUARTZ_3     = 69;   //0x45
-constexpr auto QUARTZ_FR4   = 81;   //0x51
-constexpr auto RUBY_1       = 70;   //0x46
-constexpr auto RUBY_2       = 71;   //0x47
-constexpr auto RUBY_3       = 72;   //0x48
-constexpr auto TITANITE_1   = 73;   //0x49
-constexpr auto TITANITE_2   = 74;   //0x4A
-constexpr auto TITANITE_3   = 75;   //0x4B
-constexpr auto TITANITE_4   = 76;   //0x4C
-constexpr auto TITANITE_5   = 77;   //0x4D
-constexpr auto TITANITE_6   = 78;   //0x4E
-//SP6 PLATFORMS
-constexpr auto SHALE_1      = 98;   //0x62
-constexpr auto SHALE_2      = 101;  //0x65
-constexpr auto SHALE_3      = 89;   //0x59
-constexpr auto CINNABAR     = 99;   //0x63
-constexpr auto SUNSTONE_1   = 97;   //0x61
-constexpr auto SUNSTONE_2   = 100;  //0x64
+const std::string P0_Present = "P0_PRESENT_L";
+const std::string P1_Present = "P1_PRESENT_L";
+const std::string DBUS_Present = "Present";
 
 constexpr auto P0_PATH = "/xyz/openbmc_project/inventory/system/processor/P0";
 constexpr auto P1_PATH = "/xyz/openbmc_project/inventory/system/processor/P1";
@@ -118,6 +94,41 @@ void CpuInfo::collect_cpu_information()
   }
 
 }
+
+int CpuInfo::getGPIOValue(const std::string& name)
+{
+    int value;
+    gpiod::line gpioLine;
+
+    // Find the GPIO line
+    gpioLine = gpiod::find_line(name);
+    if (!gpioLine)
+    {
+        sd_journal_print(LOG_ERR, "Can't find line: %s \n", name.c_str());
+        return -1;
+    }
+    try
+    {
+        gpioLine.request({__FUNCTION__, gpiod::line_request::DIRECTION_INPUT});
+    }
+    catch (std::system_error& exc)
+    {
+        sd_journal_print(LOG_ERR, "Error setting gpio as Input: %s \n", name.c_str());
+        return -1;
+    }
+
+    try
+    {
+        value = gpioLine.get_value();
+    }
+    catch (std::system_error& exc)
+    {
+        sd_journal_print(LOG_ERR, "Error getting gpio value for: %s \n", name.c_str());
+        return -1;
+    }
+
+    return value;
+}
 //Call Apml library to get the CPU Info
 bool CpuInfo::connect_apml_get_family_model_step(uint8_t soc_num )
 {
@@ -130,6 +141,7 @@ bool CpuInfo::connect_apml_get_family_model_step(uint8_t soc_num )
     uint32_t ext_model;
     int core_id = 0;
     uint16_t freq;
+    uint16_t cpuPresence;
     ebx = 0;
     edx = 0;
     eax = EAX_VAL;
@@ -149,6 +161,16 @@ bool CpuInfo::connect_apml_get_family_model_step(uint8_t soc_num )
           break;
         }
       }//end of retry
+
+      std::string processor_presence = (soc_num == 0) ? P0_Present: P1_Present;
+      cpuPresence = getGPIOValue(processor_presence);
+      if (cpuPresence == 1)
+      {
+         //set false -Absent if GPIO value is high -default is true
+         set_cpu_bool_value(soc_num, false, DBUS_Present, CPU_INTERFACE);
+         sd_journal_print(LOG_INFO, "Warning : %d CPU is absent \n", soc_num);
+         return false;
+      }
 
       if(ret != 0)
       {
@@ -615,6 +637,45 @@ void CpuInfo::set_cpu_int_value(uint8_t soc_num, uint32_t value, std::string pro
           "org.freedesktop.DBus.Properties", "Set",
           get_interface(enum_val), property_name,
           std::variant<uint32_t>(value));
+    }
+}
+
+void CpuInfo::set_cpu_bool_value(uint8_t soc_num, bool value, std::string property_name, uint8_t enum_val)
+{
+    sd_journal_print(LOG_INFO,"Set the DBUS Property of %s \n", property_name.c_str());
+    sdbusplus::bus::bus bus = sdbusplus::bus::new_default();
+    boost::system::error_code ec;
+    boost::asio::io_context io;
+    auto conn = std::make_shared<sdbusplus::asio::connection>(io);
+    if (soc_num == 0)
+    {
+      conn->async_method_call(
+          [this](boost::system::error_code ec) {
+              if (ec)
+              {
+                  sd_journal_print(LOG_ERR, "Failed to set CPU value in dbus interface \n");
+              }
+          },
+          "xyz.openbmc_project.Inventory.Manager",
+          P0_PATH,
+          "org.freedesktop.DBus.Properties", "Set",
+          get_interface(enum_val), property_name,
+          std::variant<bool>(value));
+    }
+    else if (soc_num == 1)
+    {
+       conn->async_method_call(
+          [this](boost::system::error_code ec) {
+              if (ec)
+              {
+                  sd_journal_print(LOG_ERR, "Failed to set CPU value in dbus interface \n");
+              }
+          },
+          "xyz.openbmc_project.Inventory.Manager",
+          P1_PATH,
+          "org.freedesktop.DBus.Properties", "Set",
+          get_interface(enum_val), property_name,
+          std::variant<bool>(value));
     }
 }
 void CpuInfo::set_cpu_int16_value(uint8_t soc_num, uint16_t value, std::string property_name, uint8_t enum_val)
