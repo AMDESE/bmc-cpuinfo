@@ -528,7 +528,7 @@ bool CpuInfo::getNumberOfCpu()
     {
        // Setup pipe for reading and execute to get u-boot environment
        pf = popen(COMMAND_NUM_OF_CPU,"r");
-       if(pf > 0)
+       if(!pf)
        {   // no error
           if (fgets(data, COMMAND_LEN , pf) != NULL)
           {
