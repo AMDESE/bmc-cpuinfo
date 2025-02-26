@@ -4,6 +4,7 @@
 #include <phosphor-logging/elog-errors.hpp>
 #include <xyz/openbmc_project/Collection/DeleteAll/server.hpp>
 #include <xyz/openbmc_project/Common/error.hpp>
+#include <xyz/openbmc_project/Inventory/Decorator/Asset/server.hpp>
 #include <xyz/openbmc_project/Inventory/Item/Cpu/server.hpp>
 #include <xyz/openbmc_project/Inventory/Item/server.hpp>
 #include <xyz/openbmc_project/State/Host/server.hpp>
@@ -60,43 +61,31 @@ struct EventDeleter
 };
 
 using EventPtr = std::unique_ptr<sd_event, EventDeleter>;
+using ProcessorPtr = sdbusplus::server::xyz::openbmc_project::inventory::item::Cpu;
+using Asset =
+    sdbusplus::server::xyz::openbmc_project::inventory::decorator::Asset;
+
 namespace StateServer = sdbusplus::xyz::openbmc_project::State::server;
 
-enum dbus_interface
-{
-    CPU_INTERFACE,
-    ASSET_INTERFACE
-};
-static const char* enum_str[] = {
-    "xyz.openbmc_project.Inventory.Item.Cpu",
-    "xyz.openbmc_project.Inventory.Decorator.Asset"};
 static const std::map<int, std::string> months_map = {
     {1, "M"}, {2, "N"}, {3, "O"}, {4, "P"},  {5, "Q"},  {6, "R"},
     {7, "S"}, {8, "T"}, {9, "U"}, {10, "V"}, {11, "W"}, {12, "X"}};
 
-struct CpuInfo
+struct CpuInfo :
+    sdbusplus::server::object_t<
+        ProcessorPtr, Asset,
+        sdbusplus::xyz::openbmc_project::Inventory::server::Item>
 {
     CpuInfoDataHolder* cpuinfoDataHolderObj =
         cpuinfoDataHolderObj->getInstance();
 
-    CpuInfo(sdbusplus::bus::bus& bus, const char* path, EventPtr& event) :
-        bus(bus),
-        propertiesChangedCpuInfoValue(
-            bus,
-            sdbusplus::bus::match::rules::type::signal() +
-                sdbusplus::bus::match::rules::member("PropertiesChanged") +
-                sdbusplus::bus::match::rules::path(
-                    "/xyz/openbmc_project/inventory/system/processor/P0") +
-                sdbusplus::bus::match::rules::argN(
-                    0, "xyz.openbmc_project.Inventory.Item.Cpu") +
-                sdbusplus::bus::match::rules::interface(
-                    cpuinfoDataHolderObj->PropertiesIntf),
-            [this](sdbusplus::message::message& msg) {
-                std::string objectName;
-                std::map<std::string, std::variant<uint32_t, bool>> msgData;
-                msg.read(objectName, msgData);
-                // TO DO - in case if we need to check any DBus Property event
-            }),
+    CpuInfo(sdbusplus::bus::bus& bus, const std::string& path, EventPtr&,
+            uint8_t soc_num) :
+        sdbusplus::server::object_t<
+            ProcessorPtr, Asset,
+            sdbusplus::xyz::openbmc_project::Inventory::server::Item>(
+            bus, path.c_str()),
+        bus(bus), soc_num(soc_num),
         propertiesChangedSignalCurrentHostState(
             bus,
             sdbusplus::bus::match::rules::type::signal() +
@@ -105,7 +94,7 @@ struct CpuInfo
                     cpuinfoDataHolderObj->HostStatePathPrefix) +
                 sdbusplus::bus::match::rules::interface(
                     cpuinfoDataHolderObj->PropertiesIntf),
-            [this](sdbusplus::message::message& msg) {
+            [this, soc_num](sdbusplus::message::message& msg) {
                 std::string objectName;
                 std::map<std::string, std::variant<std::string>> msgData;
                 msg.read(objectName, msgData);
@@ -124,50 +113,35 @@ struct CpuInfo
                             sd_journal_print(
                                 LOG_INFO,
                                 "cpu service started after bmc or host reboot... \n");
-                            if (getNumberOfCpu())
-                            {
-                                collect_cpu_information();
-                            }
+                            collect_cpu_information(soc_num);
                         }
                     }
                 }
             })
     {
         sd_journal_print(LOG_DEBUG, "cpu service start... \n");
+        collect_cpu_information(soc_num);
     }
     ~CpuInfo() {}
 
   private:
     sdbusplus::bus::bus& bus;
-    sdbusplus::bus::match_t propertiesChangedCpuInfoValue;
+    uint8_t soc_num;
     sdbusplus::bus::match_t propertiesChangedSignalCurrentHostState;
     std::string get_interface(uint8_t enum_val);
-    uint8_t num_of_proc = 1;
-    unsigned int num_of_cpu = 0;
 
     // oob-lib functions
-    bool getNumberOfCpu();
-    void collect_cpu_information();
+    void collect_cpu_information(uint8_t);
     int getGPIOValue(const std::string& name);
-    void set_general_info(uint8_t soc_num);
+    void set_general_info();
     bool connect_apml_get_family_model_step(uint8_t soc_num);
     void get_threads_per_core_and_soc(uint8_t soc_num);
     void get_cpu_base_freq(uint8_t soc_num);
     void get_ppin_fuse(uint8_t soc_num);
     void get_microcode_rev(uint8_t soc_num);
 
-    // DBUS functions
-    void set_cpu_string_value(uint8_t soc_num, std::string value,
-                              std::string property_name, uint8_t enum_val);
-    void set_cpu_int_value(uint8_t soc_num, uint32_t value,
-                           std::string property_name, uint8_t enum_val);
-    void set_cpu_int16_value(uint8_t soc_num, uint16_t value,
-                             std::string property_name, uint8_t enum_val);
-    void set_cpu_bool_value(uint8_t soc_num, bool value,
-                            std::string property_name, uint8_t enum_val);
-
     // decode ppin function
-    void decode_PPIN(uint8_t soc_num, uint64_t data);
+    void decode_PPIN(uint64_t data);
     void decode_lotstring(char* ppinstr, std::string&);
     void decode_datemonth_unitlot(char* ppinstr, std::string& datemonthlotstr);
 
