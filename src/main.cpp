@@ -15,7 +15,8 @@ int main()
     ret = sd_event_default(&event);
     if (ret < 0)
     {
-	sd_journal_print(LOG_ERR, "Error creating a default sd_event handler \n");
+        sd_journal_print(LOG_ERR,
+                         "Error creating a default sd_event handler \n");
         return ret;
     }
     EventPtr eventP{event};
@@ -35,15 +36,18 @@ int main()
         ret = sd_event_loop(eventP.get());
         if (ret < 0)
         {
-	  sd_journal_print(LOG_ERR, "Error occurred during the sd_event_loop %d \n", ret);
+            sd_journal_print(
+                LOG_ERR, "Error occurred during the sd_event_loop %d \n", ret);
         }
     }
     catch (std::exception& e)
     {
-        //phosphor::logging::log<phosphor::logging::level::ERR>(e.what());
-	sd_journal_print(LOG_ERR, "Exception occurred during the sd_event_loop %s \n", e.what());
+        // phosphor::logging::log<phosphor::logging::level::ERR>(e.what());
+        sd_journal_print(LOG_ERR,
+                         "Exception occurred during the sd_event_loop %s \n",
+                         e.what());
         return -1;
     }
-   
+
     return 0;
 }
