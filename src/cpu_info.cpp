@@ -20,7 +20,6 @@ extern "C"
 #include "apml64Config.h"
 #include "esmi_cpuid_msr.h"
 #include "esmi_mailbox.h"
-#include "esmi_mailbox_nda.h"
 #include "esmi_rmi.h"
 #include "esmi_tsi.h"
 #include "i2c/smbus.h"
@@ -29,7 +28,6 @@ extern "C"
 #include <unistd.h>
 }
 
-#define COMMAND_NUM_OF_CPU ("/sbin/fw_printenv -n num_of_cpu")
 #define COMMAND_LEN (3)
 #define MAX_RETRY 20
 
@@ -46,7 +44,6 @@ extern "C"
 #define EAX_MASK_MAGIC_2 0xff
 #define EAX_MASK_MAGIC_3 0x10
 #define APML_SLEEP 10000
-#define MUX_SLEEP 5
 
 // PPIN logic
 #define LOWER_PINBITS 8
@@ -66,10 +63,6 @@ extern "C"
 
 const std::string P0_Present = "P0_PRESENT_L";
 const std::string P1_Present = "P1_PRESENT_L";
-const std::string DBUS_Present = "Present";
-
-constexpr auto P0_PATH = "/xyz/openbmc_project/inventory/system/processor/P0";
-constexpr auto P1_PATH = "/xyz/openbmc_project/inventory/system/processor/P1";
 
 CpuInfoDataHolder* CpuInfoDataHolder::instance = 0;
 
@@ -81,19 +74,24 @@ uint32_t ecx;
 uint32_t edx;
 
 // Init CPU Information using OOB library
-void CpuInfo::collect_cpu_information()
+void CpuInfo::collect_cpu_information(uint8_t soc_num)
 {
-    for (uint8_t soc_num = 0; soc_num < num_of_proc; soc_num++)
+    oob_status_t ret = OOB_MAILBOX_CMD_UNKNOWN;
+
+    while (ret != OOB_SUCCESS)
     {
-        if (connect_apml_get_family_model_step(soc_num))
-        {
-            set_general_info(soc_num);
-            get_cpu_base_freq(soc_num);
-            get_ppin_fuse(soc_num);
-            get_threads_per_core_and_soc(soc_num);
-            get_microcode_rev(soc_num);
-            get_opn(soc_num);
-        }
+        ret = esmi_get_processor_info(0, plat_info);
+        sleep(1);
+    }
+
+    if (connect_apml_get_family_model_step(soc_num))
+    {
+        set_general_info();
+        get_cpu_base_freq(soc_num);
+        get_ppin_fuse(soc_num);
+        get_threads_per_core_and_soc(soc_num);
+        get_microcode_rev(soc_num);
+        get_opn(soc_num);
     }
 }
 
@@ -111,7 +109,8 @@ int CpuInfo::getGPIOValue(const std::string& name)
     }
     try
     {
-        gpioLine.request({__FUNCTION__, gpiod::line_request::DIRECTION_INPUT});
+        gpioLine.request(
+            {__FUNCTION__, gpiod::line_request::DIRECTION_INPUT, 0});
     }
     catch (std::system_error& exc)
     {
@@ -133,19 +132,19 @@ int CpuInfo::getGPIOValue(const std::string& name)
 
     return value;
 }
+
 // Call Apml library to get the CPU Info
 bool CpuInfo::connect_apml_get_family_model_step(uint8_t soc_num)
 {
     int retry = 0;
     oob_status_t ret;
-    uint32_t family_id;
-    uint32_t model_id;
-    uint32_t step_id;
-    uint32_t ext_family;
-    uint32_t ext_model;
-    int core_id = 0;
-    uint16_t freq;
+    uint16_t family_id;
+    uint16_t model_id;
+    uint16_t step_id;
+    uint16_t ext_family;
+    uint16_t ext_model;
     uint16_t cpuPresence;
+    int core_id = 0;
     ebx = 0;
     edx = 0;
     eax = EAX_VAL;
@@ -157,7 +156,7 @@ bool CpuInfo::connect_apml_get_family_model_step(uint8_t soc_num)
             ret = esmi_oob_cpuid(soc_num, core_id, &eax, &ebx, &ecx, &edx);
             if (ret != 0)
             {
-                sleep(MUX_SLEEP);
+                usleep(APML_SLEEP);
                 retry++;
             }
             else
@@ -171,11 +170,15 @@ bool CpuInfo::connect_apml_get_family_model_step(uint8_t soc_num)
         cpuPresence = getGPIOValue(processor_presence);
         if (cpuPresence == 1)
         {
-            // set false -Absent if GPIO value is high -default is true
-            set_cpu_bool_value(soc_num, false, DBUS_Present, CPU_INTERFACE);
+            // set false -Absent if GPIO value is high
+            present(false);
             sd_journal_print(LOG_INFO, "Warning : %d CPU is absent \n",
                              soc_num);
             return false;
+        }
+        else
+        {
+            present(true);
         }
 
         if (ret != 0)
@@ -188,43 +191,32 @@ bool CpuInfo::connect_apml_get_family_model_step(uint8_t soc_num)
             char cpuid[CMD_BUFF_LEN] = {0};
 
             ext_family = ((eax >> EAX_DATA_LEN_4) & EAX_MASK_MAGIC_2);
-            sprintf(cpuid, "%x (%d)", ext_family, ext_family);
-            // convert char to string
-            std::string eff_family_str(cpuid);
-            set_cpu_string_value(soc_num, eff_family_str, "EffectiveFamily",
-                                 CPU_INTERFACE);
+            effectiveFamily(ext_family);
 
             cpuid[CMD_BUFF_LEN] = {0};
             family_id = ((eax >> EAX_DATA_LEN_2) & EAX_MASK_MAGIC_1) +
                         ext_family;
             sprintf(cpuid, "%x (%d)", family_id, family_id);
             std::string family_str(cpuid);
-            set_cpu_string_value(soc_num, family_str, "Family", CPU_INTERFACE);
+            family(family_str);
 
-            cpuid[CMD_BUFF_LEN] = {0};
             ext_model = ((eax >> EAX_DATA_LEN_3) & EAX_MASK_MAGIC_1);
-            sprintf(cpuid, "%x (%d)", ext_model, ext_model);
-            std::string eff_model_str(cpuid);
-            set_cpu_string_value(soc_num, eff_model_str, "EffectiveModel",
-                                 CPU_INTERFACE);
+            effectiveModel(ext_model);
 
             cpuid[CMD_BUFF_LEN] = {0};
             model_id = ext_model * EAX_MASK_MAGIC_3 +
                        ((eax >> EAX_DATA_LEN_1) & EAX_MASK_MAGIC_1);
             sprintf(cpuid, "%x (%d)", model_id, model_id);
             std::string model_str(cpuid);
-            set_cpu_string_value(soc_num, model_str, "Model", CPU_INTERFACE);
+            model(model_str);
 
-            cpuid[CMD_BUFF_LEN] = {0};
             step_id = eax & EAX_MASK_MAGIC_1;
-            sprintf(cpuid, "%x (%d)", step_id, step_id);
-            std::string step_str(cpuid);
-            set_cpu_string_value(soc_num, step_str, "Step", CPU_INTERFACE);
+            step(step_id);
 
             cpuid[CMD_BUFF_LEN] = {0};
             sprintf(cpuid, "%d", soc_num);
             std::string socket_str(cpuid);
-            set_cpu_string_value(soc_num, socket_str, "Socket", CPU_INTERFACE);
+            socket(socket_str);
 
             return true;
         }
@@ -238,6 +230,7 @@ bool CpuInfo::connect_apml_get_family_model_step(uint8_t soc_num)
 
     return false;
 }
+
 // Get the OPN
 void CpuInfo::get_opn(uint8_t soc_num)
 {
@@ -388,8 +381,9 @@ void CpuInfo::get_opn(uint8_t soc_num)
     sd_journal_print(LOG_INFO, "OPN string # %s \n", opn_str.c_str());
 
     // set the value in DBUS
-    set_cpu_string_value(soc_num, opn_str, PARTNUMBER, ASSET_INTERFACE);
+    partNumber(opn_str);
 }
+
 // Read register thru apml lib
 bool CpuInfo::read_register(uint8_t soc_num, uint32_t thread_ind,
                             uint32_t cpuid_fn, uint32_t cpuid_extd_fn,
@@ -440,11 +434,13 @@ u_int8_t CpuInfo::get_reg_offset_conv(uint32_t reg, uint32_t offset,
 {
     return ((reg & flag) >> offset);
 }
-void CpuInfo::set_general_info(uint8_t soc_num)
+
+void CpuInfo::set_general_info()
 {
-    set_cpu_string_value(soc_num, "AMD", "Manufacturer", ASSET_INTERFACE);
-    set_cpu_string_value(soc_num, "AuthenticAMD", "VendorId", CPU_INTERFACE);
+    manufacturer("AMD");
+    vendorId("AuthenticAMD");
 }
+
 // Get processor threads per Core and Socket
 void CpuInfo::get_threads_per_core_and_soc(uint8_t soc_num)
 {
@@ -461,8 +457,7 @@ void CpuInfo::get_threads_per_core_and_soc(uint8_t soc_num)
         }
         else
         {
-            set_cpu_int16_value(soc_num, threads_per_soc, "ThreadCount",
-                                CPU_INTERFACE);
+            threadCount(threads_per_soc);
             isthreadcall_pass = true;
         }
         usleep(APML_SLEEP);
@@ -478,8 +473,7 @@ void CpuInfo::get_threads_per_core_and_soc(uint8_t soc_num)
             if (isthreadcall_pass)
             {
                 uint32_t TotalCores = threads_per_soc / threads_per_core;
-                set_cpu_int16_value(soc_num, TotalCores, "CoreCount",
-                                    CPU_INTERFACE);
+                coreCount(TotalCores);
             }
         }
     }
@@ -492,7 +486,7 @@ void CpuInfo::get_threads_per_core_and_soc(uint8_t soc_num)
 
 void CpuInfo::get_cpu_base_freq(uint8_t soc_num)
 {
-    uint32_t buffer, value;
+    uint32_t buffer;
     oob_status_t ret;
     try
     {
@@ -509,60 +503,27 @@ void CpuInfo::get_cpu_base_freq(uint8_t soc_num)
         sd_journal_print(LOG_ERR, "Error getting CPU Base Freq value \n");
         return;
     }
-    set_cpu_int_value(soc_num, buffer, "MaxSpeedInMhz", CPU_INTERFACE);
+
+    maxSpeedInMhz(buffer);
 }
+
 // Get PPIN then we need to Decode to get Serial Number
 void CpuInfo::get_ppin_fuse(uint8_t soc_num)
 {
-    uint32_t buffer = 0;
     oob_status_t ret;
     uint64_t data = 0;
-    char cpuid[CMD_BUFF_LEN];
-    int retry = 0;
-    // APML read mail box takes time to init, hence added retry
-    try
-    {
-        while (retry < MAX_RETRY)
-        {
-            // Read lower 32 bit PPIN data$
-            ret = esmi_oob_read_mailbox(soc_num, READ_PPIN_FUSE, LO_WORD_REG,
-                                        &buffer);
-            if (ret != 0)
-            {
-                sleep(MUX_SLEEP);
-                retry++;
-            }
-            else
-            {
-                break;
-            }
-        } // end of retry
 
-        if (!ret)
-        {
-            data = buffer;
-            // Read higher 32 bit PPIN data
-            ret = esmi_oob_read_mailbox(soc_num, READ_PPIN_FUSE, HI_WORD_REG,
-                                        &buffer);
-            if (!ret)
-            {
-                data |= ((uint64_t)buffer << 32);
-                sd_journal_print(LOG_INFO, "ppin_fuse data %d", data);
-                // now decode PPIN to get SN
-                decode_PPIN(soc_num, data);
-            }
-        }
-        else
-        {
-            sd_journal_print(LOG_ERR, "Error reading lower 32 PPN value \n");
-        }
-    }
-    catch (std::exception& e)
+    ret = read_ppin_fuse(soc_num, &data);
+    if (ret)
     {
-        sd_journal_print(LOG_ERR, "Error getting PPN value \n");
-        return;
+        sd_journal_print(LOG_ERR, "Failed to read PPIN fuse data\n");
+    }
+    else
+    {
+        decode_PPIN(data);
     }
 }
+
 void CpuInfo::get_microcode_rev(uint8_t soc_num)
 {
     uint32_t ucode;
@@ -576,227 +537,14 @@ void CpuInfo::get_microcode_rev(uint8_t soc_num)
             return;
         }
         sd_journal_print(LOG_INFO, "|ucode revision  | 0x%-32x |\n", ucode);
-        // set the Dbus value
-        char microid[CMD_BUFF_LEN] = {0};
-        sprintf(microid, "0x%x", ucode);
-        // convert char to string
-        std::string microcode_str(microid);
-        set_cpu_string_value(soc_num, microcode_str, "Microcode",
-                             CPU_INTERFACE);
+        microcode(ucode);
     }
     catch (std::exception& e)
     {
         sd_journal_print(LOG_ERR, "Error getting microcode: %s \n", e.what());
     }
 }
-// get the platform ID
-bool CpuInfo::getNumberOfCpu()
-{
-    FILE* pf;
-    char data[COMMAND_LEN];
-    try
-    {
-        // Setup pipe for reading and execute to get u-boot environment
-        pf = popen(COMMAND_NUM_OF_CPU, "r");
-        if (pf > 0)
-        { // no error
-            if (fgets(data, COMMAND_LEN, pf) != NULL)
-            {
-                num_of_proc = stoi((std::string)data);
-                sd_journal_print(LOG_INFO, "Number of Cpu %d\n", num_of_proc);
-            }
-            pclose(pf);
-            return true;
-        }
-        else
-        {
-            sd_journal_print(LOG_ERR, "Failed to open command stream \n");
-        }
-    }
-    catch (std::exception& e)
-    {
-        sd_journal_print(LOG_ERR, "Error reading number of cpu %s \n",
-                         e.what());
-    }
 
-    return false;
-}
-
-std::string CpuInfo::get_interface(uint8_t enum_val)
-{
-    return enum_str[enum_val];
-}
-// Set the CPU DBus value
-void CpuInfo::set_cpu_string_value(uint8_t soc_num, std::string value,
-                                   std::string property_name, uint8_t enum_val)
-{
-    try
-    {
-        sd_journal_print(LOG_INFO, "Set the DBUS Property of %s \n",
-                         property_name.c_str());
-        sdbusplus::bus::bus bus = sdbusplus::bus::new_default();
-        boost::system::error_code ec;
-        boost::asio::io_context io;
-        auto conn = std::make_shared<sdbusplus::asio::connection>(io);
-        if (soc_num == 0)
-        {
-            conn->async_method_call(
-                [this](boost::system::error_code ec) {
-                    if (ec)
-                    {
-                        sd_journal_print(
-                            LOG_ERR,
-                            "Failed to set CPU value in dbus interface \n");
-                    }
-                },
-                "xyz.openbmc_project.Inventory.Manager", P0_PATH,
-                "org.freedesktop.DBus.Properties", "Set",
-                get_interface(enum_val), property_name,
-                std::variant<std::string>(value));
-        }
-        else if (soc_num == 1)
-        {
-            conn->async_method_call(
-                [this](boost::system::error_code ec) {
-                    if (ec)
-                    {
-                        sd_journal_print(
-                            LOG_ERR,
-                            "Failed to set CPU value in dbus interface \n");
-                    }
-                },
-                "xyz.openbmc_project.Inventory.Manager", P1_PATH,
-                "org.freedesktop.DBus.Properties", "Set",
-                get_interface(enum_val), property_name,
-                std::variant<std::string>(value));
-        }
-    }
-    catch (std::exception& e)
-    {
-        sd_journal_print(LOG_ERR, "Error in setting Dbus : %s \n", e.what());
-    }
-}
-void CpuInfo::set_cpu_int_value(uint8_t soc_num, uint32_t value,
-                                std::string property_name, uint8_t enum_val)
-{
-    sd_journal_print(LOG_INFO, "Set the DBUS Property of %s \n",
-                     property_name.c_str());
-    sdbusplus::bus::bus bus = sdbusplus::bus::new_default();
-    boost::system::error_code ec;
-    boost::asio::io_context io;
-    auto conn = std::make_shared<sdbusplus::asio::connection>(io);
-    if (soc_num == 0)
-    {
-        conn->async_method_call(
-            [this](boost::system::error_code ec) {
-                if (ec)
-                {
-                    sd_journal_print(
-                        LOG_ERR,
-                        "Failed to set CPU value in dbus interface \n");
-                }
-            },
-            "xyz.openbmc_project.Inventory.Manager", P0_PATH,
-            "org.freedesktop.DBus.Properties", "Set", get_interface(enum_val),
-            property_name, std::variant<uint32_t>(value));
-    }
-    else if (soc_num == 1)
-    {
-        conn->async_method_call(
-            [this](boost::system::error_code ec) {
-                if (ec)
-                {
-                    sd_journal_print(
-                        LOG_ERR,
-                        "Failed to set CPU value in dbus interface \n");
-                }
-            },
-            "xyz.openbmc_project.Inventory.Manager", P1_PATH,
-            "org.freedesktop.DBus.Properties", "Set", get_interface(enum_val),
-            property_name, std::variant<uint32_t>(value));
-    }
-}
-
-void CpuInfo::set_cpu_bool_value(uint8_t soc_num, bool value,
-                                 std::string property_name, uint8_t enum_val)
-{
-    sd_journal_print(LOG_INFO, "Set the DBUS Property of %s \n",
-                     property_name.c_str());
-    sdbusplus::bus::bus bus = sdbusplus::bus::new_default();
-    boost::system::error_code ec;
-    boost::asio::io_context io;
-    auto conn = std::make_shared<sdbusplus::asio::connection>(io);
-    if (soc_num == 0)
-    {
-        conn->async_method_call(
-            [this](boost::system::error_code ec) {
-                if (ec)
-                {
-                    sd_journal_print(
-                        LOG_ERR,
-                        "Failed to set CPU value in dbus interface \n");
-                }
-            },
-            "xyz.openbmc_project.Inventory.Manager", P0_PATH,
-            "org.freedesktop.DBus.Properties", "Set", get_interface(enum_val),
-            property_name, std::variant<bool>(value));
-    }
-    else if (soc_num == 1)
-    {
-        conn->async_method_call(
-            [this](boost::system::error_code ec) {
-                if (ec)
-                {
-                    sd_journal_print(
-                        LOG_ERR,
-                        "Failed to set CPU value in dbus interface \n");
-                }
-            },
-            "xyz.openbmc_project.Inventory.Manager", P1_PATH,
-            "org.freedesktop.DBus.Properties", "Set", get_interface(enum_val),
-            property_name, std::variant<bool>(value));
-    }
-}
-void CpuInfo::set_cpu_int16_value(uint8_t soc_num, uint16_t value,
-                                  std::string property_name, uint8_t enum_val)
-{
-    sd_journal_print(LOG_INFO, "Set the DBUS Property of %s \n",
-                     property_name.c_str());
-    sdbusplus::bus::bus bus = sdbusplus::bus::new_default();
-    boost::system::error_code ec;
-    boost::asio::io_context io;
-    auto conn = std::make_shared<sdbusplus::asio::connection>(io);
-    if (soc_num == 0)
-    {
-        conn->async_method_call(
-            [this](boost::system::error_code ec) {
-                if (ec)
-                {
-                    sd_journal_print(
-                        LOG_ERR,
-                        "Failed to set CPU value in dbus interface \n");
-                }
-            },
-            "xyz.openbmc_project.Inventory.Manager", P0_PATH,
-            "org.freedesktop.DBus.Properties", "Set", get_interface(enum_val),
-            property_name, std::variant<uint16_t>(value));
-    }
-    else if (soc_num == 1)
-    {
-        conn->async_method_call(
-            [this](boost::system::error_code ec) {
-                if (ec)
-                {
-                    sd_journal_print(
-                        LOG_ERR,
-                        "Failed to set CPU value in dbus interface \n");
-                }
-            },
-            "xyz.openbmc_project.Inventory.Manager", P1_PATH,
-            "org.freedesktop.DBus.Properties", "Set", get_interface(enum_val),
-            property_name, std::variant<uint16_t>(value));
-    }
-}
 // function to decode Marking Month - last Digit of making Year and Unit # in
 // lot
 void CpuInfo::decode_datemonth_unitlot(char* ppinstr,
@@ -849,6 +597,7 @@ void CpuInfo::decode_datemonth_unitlot(char* ppinstr,
 
     datemonthlotstr = monthstr + std::to_string(year) + devnumstr;
 }
+
 // decode marked lot number char length is 7 -Fuse/mak lot #
 void CpuInfo::decode_lotstring(char* ppinstr, std::string& markedlotstr)
 {
@@ -899,22 +648,18 @@ void CpuInfo::decode_lotstring(char* ppinstr, std::string& markedlotstr)
     }
     markedlotstr = currentchar;
 }
+
 // decode PPIN to get SN
-void CpuInfo::decode_PPIN(uint8_t soc_num, uint64_t data)
+void CpuInfo::decode_PPIN(uint64_t data)
 {
     char ppinstr[CMD_BUFF_LEN] = {0};
-    char setppinstr[CMD_BUFF_LEN] = {0};
     std::string markedlotstr;
     std::string datemonthlotstr;
     std::string serialnumstr;
 
-    sprintf(setppinstr, "0x%llx", data);
-    sd_journal_print(LOG_INFO, "PPIN Fuse : %s \n", setppinstr);
-    // convert char to string
-    std::string setppinstr_str(setppinstr);
-    set_cpu_string_value(soc_num, setppinstr_str, "PPIN", CPU_INTERFACE);
+    id(data);
 
-    sprintf(ppinstr, "0%llx", data);
+    sprintf(ppinstr, "0%lx", data);
     decode_lotstring(ppinstr, markedlotstr);
     sd_journal_print(LOG_INFO, "Mark Lot string # %s \n", markedlotstr.c_str());
 
@@ -925,14 +670,7 @@ void CpuInfo::decode_PPIN(uint8_t soc_num, uint64_t data)
     // serial Number = lotstring + month + year + devnum
     serialnumstr = markedlotstr + datemonthlotstr;
 
-    // now convert string to Char buffer to set in DBus
-    char serialnum_buffer[serialnumstr.length() + 1];
-    strcpy(serialnum_buffer, serialnumstr.c_str());
-
-    // set the Dbus property
-    std::string serialnum_buffer_str(serialnum_buffer);
-    set_cpu_string_value(soc_num, serialnum_buffer_str, "SerialNumber",
-                         ASSET_INTERFACE);
+    serialNumber(serialnumstr.c_str());
 
     return;
 }
