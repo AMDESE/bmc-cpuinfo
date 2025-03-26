@@ -12,5 +12,5 @@ SyslogIdentifier=cpu-info
 Type=simple
 
 [Install]
-WantedBy=multi-user.target
+#WantedBy=multi-user.target
 
