@@ -21,6 +21,8 @@ uint8_t getSocketInfo()
     uint8_t cpuCount = 0;
     uint32_t boardId;
 
+    oob_status_t ret = OOB_MAILBOX_CMD_UNKNOWN;
+
     std::unique_ptr<FILE, void (*)(FILE*)> pipe(
         popen("/sbin/fw_printenv -n board_id", "r"), [](FILE* f) {
             if (f)

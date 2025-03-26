@@ -76,14 +76,6 @@ uint32_t edx;
 // Init CPU Information using OOB library
 void CpuInfo::collect_cpu_information(uint8_t soc_num)
 {
-    oob_status_t ret = OOB_MAILBOX_CMD_UNKNOWN;
-
-    while (ret != OOB_SUCCESS)
-    {
-        ret = esmi_get_processor_info(0, plat_info);
-        sleep(1);
-    }
-
     if (connect_apml_get_family_model_step(soc_num))
     {
         set_general_info();
