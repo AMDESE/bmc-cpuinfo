@@ -512,7 +512,11 @@ void CpuInfo::get_ppin_fuse(uint8_t soc_num)
     }
     else
     {
-        decode_PPIN(data);
+        id(data);
+        if(data != 0)
+        {
+            decode_PPIN(data);
+        }
     }
 }
 
@@ -648,8 +652,6 @@ void CpuInfo::decode_PPIN(uint64_t data)
     std::string markedlotstr;
     std::string datemonthlotstr;
     std::string serialnumstr;
-
-    id(data);
 
     sprintf(ppinstr, "0%lx", data);
     decode_lotstring(ppinstr, markedlotstr);
