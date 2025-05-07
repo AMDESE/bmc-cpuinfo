@@ -5,6 +5,7 @@ After=mapper-wait@-xyz-openbmc_project-inventory.service
 After=xyz.openbmc_project.Control.Host.Power_cap.service
 
 [Service]
+ExecStartPre=/bin/sh -c 'while [ ! -f /var/run/apml_comm_active ]; do sleep 1; done'
 ExecStart=/usr/bin/cpu-info
 Restart=always
 RestartSec=3
