@@ -87,12 +87,15 @@ int main()
     sdbusplus::server::manager_t inventory{bus,
                                            "/xyz/openbmc_project/inventory"};
     sdbusplus::server::manager_t manager0{bus, DBUS_P0_OBJECT_NAME};
-    CpuInfo cpuInfo{bus, DBUS_P0_OBJECT_NAME, eventP, 0};
+    CpuInfo cpuInfo0{bus, DBUS_P0_OBJECT_NAME, eventP, 0};
+
+    std::optional<sdbusplus::server::manager_t> manager1;
+    std::optional<CpuInfo> cpuInfo1;
 
     if (cpuCount == SOCKET_2)
     {
-        sdbusplus::server::manager_t managaer1{bus, DBUS_P1_OBJECT_NAME};
-        CpuInfo cpuInfo{bus, DBUS_P1_OBJECT_NAME, eventP, 1};
+        manager1.emplace(bus, DBUS_P1_OBJECT_NAME);
+        cpuInfo1.emplace(bus, DBUS_P1_OBJECT_NAME, eventP, 1);
     }
 
     try
