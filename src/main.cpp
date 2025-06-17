@@ -1,6 +1,8 @@
 #include "cpu_info.hpp"
 
 /* Venice Platform IDs */
+
+constexpr int MARLEY = 121;    // 0x79
 constexpr int CONGO = 128;     // 0x80
 constexpr int CONGO_1 = 129;   // 0x81
 constexpr int CONGO_2 = 134;   // 0x86
@@ -9,6 +11,17 @@ constexpr int MOROCCO_1 = 131; // 0x83
 constexpr int MOROCCO_2 = 135; // 0x87
 constexpr int KENYA = 132;     // 0x84
 constexpr int NIGERIA = 133;   // 0x85
+constexpr int GHANA = 142;     // 0x8E
+constexpr int SAHARA = 137;    // 0x89
+constexpr int MALAWI = 138;    // 0x8A
+constexpr int ZAIRE = 158;     // 0x9E
+constexpr int MARRAKESH = 176; // 0xB0
+
+/*Venice SLT boards*/
+constexpr int SENEGAL_SLT = 136; // 0x88
+constexpr int ZAMBIA = 139;      // 0x8B
+constexpr int ZIMBABWE = 140;    // 0x8C
+constexpr int ZANZIBAR = 141;    // 0x8D
 
 constexpr uint8_t SOCKET_1 = 1;
 constexpr uint8_t SOCKET_2 = 2;
@@ -39,12 +52,18 @@ uint8_t getSocketInfo()
             ss >> boardId;
 
             if ((boardId == MOROCCO) || (boardId == MOROCCO_1) ||
-                (boardId == MOROCCO_2) || (boardId == NIGERIA))
+                (boardId == MOROCCO_2) || (boardId == NIGERIA) ||
+                (boardId == GHANA) || (boardId == MARLEY) ||
+                (boardId == MALAWI))
             {
                 cpuCount = SOCKET_2;
             }
             else if ((boardId == CONGO) || (boardId == CONGO_1) ||
-                     (boardId == CONGO_2) || (boardId == KENYA))
+                     (boardId == CONGO_2) || (boardId == KENYA) ||
+                     (boardId == SENEGAL_SLT) || (boardId == ZAMBIA) ||
+                     (boardId == ZIMBABWE) || (boardId == ZANZIBAR) ||
+                     (boardId == SAHARA) || (boardId == ZAIRE) ||
+                     (boardId == MARRAKESH))
             {
                 cpuCount = SOCKET_1;
             }
