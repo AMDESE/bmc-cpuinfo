@@ -14,6 +14,7 @@
 #include <iostream>
 #include <map>
 #include <sstream>
+#include <thread>
 
 #define CPUID_Fn8000002 (0x80000002)
 #define CPUID_Fn8000003 (0x80000003)
@@ -61,7 +62,8 @@ struct EventDeleter
 };
 
 using EventPtr = std::unique_ptr<sd_event, EventDeleter>;
-using ProcessorPtr = sdbusplus::server::xyz::openbmc_project::inventory::item::Cpu;
+using ProcessorPtr =
+    sdbusplus::server::xyz::openbmc_project::inventory::item::Cpu;
 using Asset =
     sdbusplus::server::xyz::openbmc_project::inventory::decorator::Asset;
 
@@ -113,14 +115,18 @@ struct CpuInfo :
                             sd_journal_print(
                                 LOG_INFO,
                                 "cpu service started after bmc or host reboot... \n");
-                            collect_cpu_information(soc_num);
+                            std::thread([this, soc_num]() {
+                                collect_cpu_information(soc_num);
+                            }).detach();
                         }
                     }
                 }
             })
     {
         sd_journal_print(LOG_DEBUG, "cpu service start... \n");
-        collect_cpu_information(soc_num);
+        std::thread([this, soc_num]() {
+            collect_cpu_information(soc_num);
+        }).detach();
     }
     ~CpuInfo() {}
 

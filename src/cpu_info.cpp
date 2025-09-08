@@ -29,7 +29,7 @@ extern "C"
 }
 
 #define COMMAND_LEN (3)
-#define MAX_RETRY 20
+#define MAX_RETRY 30
 
 #define CMD_BUFF_LEN 256
 #define FNAME_LEN 128
@@ -43,7 +43,7 @@ extern "C"
 #define EAX_MASK_MAGIC_1 0xf
 #define EAX_MASK_MAGIC_2 0xff
 #define EAX_MASK_MAGIC_3 0x10
-#define APML_SLEEP 10000
+#define APML_SLEEP 10
 
 // PPIN logic
 #define LOWER_PINBITS 8
@@ -141,21 +141,42 @@ bool CpuInfo::connect_apml_get_family_model_step(uint8_t soc_num)
     edx = 0;
     eax = EAX_VAL;
     ecx = 0;
+
+    boost::asio::io_context io;
+    boost::asio::steady_timer timer(io);
+
     try
     {
-        while (retry < MAX_RETRY)
-        {
-            ret = esmi_oob_cpuid(soc_num, core_id, &eax, &ebx, &ecx, &edx);
-            if (ret != 0)
+        std::function<void(const boost::system::error_code&)> retry_handler;
+        retry_handler = [&](const boost::system::error_code& ec) {
+            if (ec)
             {
-                usleep(APML_SLEEP);
+                return;
+            }
+
+            ret = esmi_oob_cpuid(soc_num, core_id, &eax, &ebx, &ecx, &edx);
+            if (ret != 0 && retry < MAX_RETRY)
+            {
                 retry++;
+                sd_journal_print(
+                    LOG_ERR,
+                    "Retry count %d: Failed to read the CPU info from APML\n",
+                    retry);
+
+                timer.expires_after(std::chrono::seconds(APML_SLEEP));
+                timer.async_wait(retry_handler); // recurse asynchronously
             }
             else
             {
-                break;
+                io.stop();
             }
-        } // end of retry
+        };
+
+        // Start first attempt immediately
+        timer.expires_after(std::chrono::seconds(0));
+        timer.async_wait(retry_handler);
+
+        io.run();
 
         std::string processor_presence =
             (soc_num == 0) ? P0_Present : P1_Present;
@@ -513,7 +534,7 @@ void CpuInfo::get_ppin_fuse(uint8_t soc_num)
     else
     {
         id(data);
-        if(data != 0)
+        if (data != 0)
         {
             decode_PPIN(data);
         }
