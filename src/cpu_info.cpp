@@ -29,7 +29,7 @@ extern "C"
 }
 
 #define COMMAND_LEN (3)
-#define MAX_RETRY 30
+#define MAX_RETRY 20
 
 #define CMD_BUFF_LEN 256
 #define FNAME_LEN 128
@@ -43,7 +43,7 @@ extern "C"
 #define EAX_MASK_MAGIC_1 0xf
 #define EAX_MASK_MAGIC_2 0xff
 #define EAX_MASK_MAGIC_3 0x10
-#define APML_SLEEP 10
+#define APML_SLEEP 10000
 
 // PPIN logic
 #define LOWER_PINBITS 8
@@ -141,42 +141,21 @@ bool CpuInfo::connect_apml_get_family_model_step(uint8_t soc_num)
     edx = 0;
     eax = EAX_VAL;
     ecx = 0;
-
-    boost::asio::io_context io;
-    boost::asio::steady_timer timer(io);
-
     try
     {
-        std::function<void(const boost::system::error_code&)> retry_handler;
-        retry_handler = [&](const boost::system::error_code& ec) {
-            if (ec)
-            {
-                return;
-            }
-
+        while (retry < MAX_RETRY)
+        {
             ret = esmi_oob_cpuid(soc_num, core_id, &eax, &ebx, &ecx, &edx);
-            if (ret != 0 && retry < MAX_RETRY)
+            if (ret != 0)
             {
+                usleep(APML_SLEEP);
                 retry++;
-                sd_journal_print(
-                    LOG_ERR,
-                    "Retry count %d: Failed to read the CPU info from APML\n",
-                    retry);
-
-                timer.expires_after(std::chrono::seconds(APML_SLEEP));
-                timer.async_wait(retry_handler); // recurse asynchronously
             }
             else
             {
-                io.stop();
+                break;
             }
-        };
-
-        // Start first attempt immediately
-        timer.expires_after(std::chrono::seconds(0));
-        timer.async_wait(retry_handler);
-
-        io.run();
+        } // end of retry
 
         std::string processor_presence =
             (soc_num == 0) ? P0_Present : P1_Present;
@@ -201,12 +180,10 @@ bool CpuInfo::connect_apml_get_family_model_step(uint8_t soc_num)
         }
         else
         {
-            char cpuid[CMD_BUFF_LEN] = {0};
-
             ext_family = ((eax >> EAX_DATA_LEN_4) & EAX_MASK_MAGIC_2);
             effectiveFamily(ext_family);
 
-            cpuid[CMD_BUFF_LEN] = {0};
+            char cpuid[CMD_BUFF_LEN] = {0};
             family_id = ((eax >> EAX_DATA_LEN_2) & EAX_MASK_MAGIC_1) +
                         ext_family;
             sprintf(cpuid, "%x (%d)", family_id, family_id);
@@ -216,18 +193,18 @@ bool CpuInfo::connect_apml_get_family_model_step(uint8_t soc_num)
             ext_model = ((eax >> EAX_DATA_LEN_3) & EAX_MASK_MAGIC_1);
             effectiveModel(ext_model);
 
-            cpuid[CMD_BUFF_LEN] = {0};
+            char cpuid_m[CMD_BUFF_LEN] = {0};
             model_id = ext_model * EAX_MASK_MAGIC_3 +
                        ((eax >> EAX_DATA_LEN_1) & EAX_MASK_MAGIC_1);
-            sprintf(cpuid, "%x (%d)", model_id, model_id);
+            sprintf(cpuid_m, "%x (%d)", model_id, model_id);
             std::string model_str(cpuid);
             model(model_str);
 
             step_id = eax & EAX_MASK_MAGIC_1;
             step(step_id);
 
-            cpuid[CMD_BUFF_LEN] = {0};
-            sprintf(cpuid, "%d", soc_num);
+            char cpuid_soc[CMD_BUFF_LEN] = {0};
+            sprintf(cpuid_soc, "%d", soc_num);
             std::string socket_str(cpuid);
             socket(socket_str);
 
@@ -534,7 +511,7 @@ void CpuInfo::get_ppin_fuse(uint8_t soc_num)
     else
     {
         id(data);
-        if (data != 0)
+        if(data != 0)
         {
             decode_PPIN(data);
         }
