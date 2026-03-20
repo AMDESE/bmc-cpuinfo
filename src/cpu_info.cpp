@@ -205,7 +205,7 @@ bool CpuInfo::connect_apml_get_family_model_step(uint8_t soc_num)
 
             char cpuid_soc[CMD_BUFF_LEN] = {0};
             sprintf(cpuid_soc, "%d", soc_num);
-            std::string socket_str(cpuid);
+            std::string socket_str(cpuid_soc);
             socket(socket_str);
 
             return true;
