@@ -1,79 +1,56 @@
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <nlohmann/json.hpp>
+
 #include "cpu_info.hpp"
-
-/* Venice Platform IDs */
-
-constexpr int MARLEY = 121;    // 0x79
-constexpr int CONGO = 128;     // 0x80
-constexpr int CONGO_1 = 129;   // 0x81
-constexpr int CONGO_2 = 134;   // 0x86
-constexpr int MOROCCO = 130;   // 0x82
-constexpr int MOROCCO_1 = 131; // 0x83
-constexpr int MOROCCO_2 = 135; // 0x87
-constexpr int KENYA = 132;     // 0x84
-constexpr int NIGERIA = 133;   // 0x85
-constexpr int GHANA = 142;     // 0x8E
-constexpr int SAHARA = 137;    // 0x89
-constexpr int MALAWI = 138;    // 0x8A
-constexpr int ZAIRE = 158;     // 0x9E
-constexpr int MARRAKESH = 176; // 0xB0
-
-/*Venice SLT boards*/
-constexpr int SENEGAL_SLT = 136; // 0x88
-constexpr int ZAMBIA = 139;      // 0x8B
-constexpr int ZIMBABWE = 140;    // 0x8C
-constexpr int ZANZIBAR = 141;    // 0x8D
 
 constexpr uint8_t SOCKET_1 = 1;
 constexpr uint8_t SOCKET_2 = 2;
-constexpr uint8_t INDEX_3 = 3;
 
 uint8_t getSocketInfo()
 {
-    char data[INDEX_3];
-    std::stringstream ss;
-    uint8_t cpuCount = 0;
-    uint32_t boardId;
+    const std::string filePath = "/var/lib/platform-config/platform.json";
 
-    std::unique_ptr<FILE, void (*)(FILE*)> pipe(
-        popen("/sbin/fw_printenv -n board_id", "r"), [](FILE* f) {
-            if (f)
-                pclose(f); // Custom deleter to call pclose
-        });
-
-    if (!pipe)
+    try
     {
-        throw std::runtime_error("Failed to read the boardID");
-    }
-
-    if (fgets(data, sizeof(data), pipe.get()) != nullptr)
-    {
+        std::ifstream file(filePath);
+        if (!file.is_open())
         {
-            ss << std::hex << (std::string)data;
-            ss >> boardId;
-
-            if ((boardId == MOROCCO) || (boardId == MOROCCO_1) ||
-                (boardId == MOROCCO_2) || (boardId == NIGERIA) ||
-                (boardId == GHANA) || (boardId == MARLEY) ||
-                (boardId == MALAWI))
-            {
-                cpuCount = SOCKET_2;
-            }
-            else if ((boardId == CONGO) || (boardId == CONGO_1) ||
-                     (boardId == CONGO_2) || (boardId == KENYA) ||
-                     (boardId == SENEGAL_SLT) || (boardId == ZAMBIA) ||
-                     (boardId == ZIMBABWE) || (boardId == ZANZIBAR) ||
-                     (boardId == SAHARA) || (boardId == ZAIRE) ||
-                     (boardId == MARRAKESH))
-            {
-                cpuCount = SOCKET_1;
-            }
-            else
-            {
-                throw std::runtime_error("Failed to find the correct board ID");
-            }
+            sd_journal_print(LOG_ERR,
+                             "Failed to open %s, default to SOCKET_1",
+                             filePath.c_str());
+            return SOCKET_1;
         }
+
+        nlohmann::json jsonData;
+        file >> jsonData;
+
+        if (!jsonData.contains("CpuCount") ||
+            !jsonData["CpuCount"].is_number())
+        {
+            sd_journal_print(LOG_ERR,
+                             "CpuCount missing/invalid in JSON, default to SOCKET_1");
+            return SOCKET_1;
+        }
+
+        int cpuCount = jsonData["CpuCount"].get<int>();
+
+        if (cpuCount == SOCKET_2)
+        {
+            return SOCKET_2;
+        }
+
+        // Explicit handling for all other cases
+        return SOCKET_1;
     }
-    return cpuCount;
+    catch (const std::exception& e)
+    {
+        sd_journal_print(LOG_ERR,
+                         "Exception parsing %s: %s, default to SOCKET_1",
+                         filePath.c_str(), e.what());
+        return SOCKET_1;
+    }
 }
 
 int main()
