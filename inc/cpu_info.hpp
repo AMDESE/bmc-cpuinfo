@@ -1,4 +1,6 @@
 #include <fcntl.h>
+#include <sys/eventfd.h>
+#include <systemd/sd-event.h>
 #include <unistd.h>
 
 #include <phosphor-logging/elog-errors.hpp>
@@ -10,9 +12,12 @@
 #include <xyz/openbmc_project/State/Host/server.hpp>
 
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <mutex>
+#include <queue>
 #include <sstream>
 #include <thread>
 
@@ -62,6 +67,50 @@ struct EventDeleter
 };
 
 using EventPtr = std::unique_ptr<sd_event, EventDeleter>;
+
+/**
+ * @brief Marshals work onto the sd_event (main) thread.
+ *
+ * An sd_bus connection is thread-compatible, not thread-safe: it may be used
+ * from multiple threads only with external locking, and a single connection
+ * must never be accessed concurrently (see openbmc/sdbusplus#28). Rather than
+ * lock around every call, this daemon keeps all bus access on the one thread
+ * that owns and dispatches the connection via the sd_event loop. Worker threads
+ * that perform the slow APML/OOB register reads post their D-Bus setter calls
+ * (which emit PropertiesChanged, etc.) here; the tasks are then executed on the
+ * event-loop thread when it wakes on the eventfd.
+ */
+class EventLoopDispatcher
+{
+  public:
+    EventLoopDispatcher() = default;
+    ~EventLoopDispatcher();
+
+    EventLoopDispatcher(const EventLoopDispatcher&) = delete;
+    EventLoopDispatcher& operator=(const EventLoopDispatcher&) = delete;
+
+    /**
+     * @brief Create the eventfd and register it with the sd_event loop.
+     *        Must be called once on the event-loop thread before use.
+     * @return 0 on success, negative errno on failure.
+     */
+    int init(sd_event* event);
+
+    /**
+     * @brief Enqueue a task to run on the event-loop thread. Thread-safe.
+     */
+    void post(std::function<void()> task);
+
+  private:
+    static int onEvent(sd_event_source* source, int fd, uint32_t revents,
+                       void* userdata);
+
+    int eventFd = -1;
+    sd_event_source* source = nullptr;
+    std::mutex mutex;
+    std::queue<std::function<void()>> tasks;
+};
+
 using ProcessorPtr =
     sdbusplus::server::xyz::openbmc_project::inventory::item::Cpu;
 using Asset =
@@ -82,12 +131,12 @@ struct CpuInfo :
         cpuinfoDataHolderObj->getInstance();
 
     CpuInfo(sdbusplus::bus::bus& bus, const std::string& path, EventPtr&,
-            uint8_t soc_num) :
+            uint8_t soc_num, EventLoopDispatcher* dispatcher) :
         sdbusplus::server::object_t<
             ProcessorPtr, Asset,
             sdbusplus::xyz::openbmc_project::Inventory::server::Item>(
             bus, path.c_str()),
-        bus(bus), soc_num(soc_num),
+        bus(bus), soc_num(soc_num), dispatcher(dispatcher),
         propertiesChangedSignalCurrentHostState(
             bus,
             sdbusplus::bus::match::rules::type::signal() +
@@ -133,8 +182,20 @@ struct CpuInfo :
   private:
     sdbusplus::bus::bus& bus;
     uint8_t soc_num;
+    EventLoopDispatcher* dispatcher;
     sdbusplus::bus::match_t propertiesChangedSignalCurrentHostState;
     std::string get_interface(uint8_t enum_val);
+
+    // Run a D-Bus property setter (or any bus access) on the event-loop
+    // thread. Called from worker threads to keep all sd-bus access on a
+    // single thread, as sd-bus requires.
+    void postToBus(std::function<void()> task)
+    {
+        if (dispatcher)
+        {
+            dispatcher->post(std::move(task));
+        }
+    }
 
     // oob-lib functions
     void collect_cpu_information(uint8_t);
