@@ -1,3 +1,6 @@
+#include <pthread.h>
+
+#include <csignal>
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -64,6 +67,19 @@ int main()
     phosphor::logging::log<phosphor::logging::level::INFO>(
         "Start cpu info service...");
 
+    // Block SIGTERM/SIGINT in this (and inherited worker) thread(s) so they are
+    // delivered synchronously to the sd_event loop instead of terminating the
+    // process via the default disposition. This must happen before any worker
+    // threads are spawned so they inherit the mask.
+    sigset_t signalMask;
+    sigemptyset(&signalMask);
+    sigaddset(&signalMask, SIGTERM);
+    sigaddset(&signalMask, SIGINT);
+    if (pthread_sigmask(SIG_BLOCK, &signalMask, nullptr) != 0)
+    {
+        sd_journal_print(LOG_ERR, "Failed to block SIGTERM/SIGINT\n");
+    }
+
     uint8_t cpuCount = getSocketInfo();
 
     sd_event* event = nullptr;
@@ -77,13 +93,32 @@ int main()
     EventPtr eventP{event};
     event = nullptr;
 
+    // Dispatcher used by worker threads to marshal all D-Bus setter calls back
+    // onto this (the event-loop) thread; a bus connection must not be
+    // accessed concurrently from multiple threads.
+    EventLoopDispatcher dispatcher;
+    ret = dispatcher.init(eventP.get());
+    if (ret < 0)
+    {
+        sd_journal_print(LOG_ERR, "Failed to init event loop dispatcher %d\n",
+                         ret);
+        return ret;
+    }
+
+    // Exit the event loop cleanly (return 0) on SIGTERM/SIGINT. A NULL handler
+    // makes sd-event call sd_event_exit() with code 0, so a commanded stop
+    // (e.g. s5-state-mgr on host power-off, or BMC reboot) is a clean shutdown
+    // rather than a signal-kill that systemd would report as a failure.
+    (void)sd_event_add_signal(eventP.get(), nullptr, SIGTERM, nullptr, nullptr);
+    (void)sd_event_add_signal(eventP.get(), nullptr, SIGINT, nullptr, nullptr);
+
     sdbusplus::bus::bus bus = sdbusplus::bus::new_default();
     bus.request_name(DBUS_SERVICE_NAME);
 
     sdbusplus::server::manager_t inventory{bus,
                                            "/xyz/openbmc_project/inventory"};
     sdbusplus::server::manager_t manager0{bus, DBUS_P0_OBJECT_NAME};
-    CpuInfo cpuInfo0{bus, DBUS_P0_OBJECT_NAME, eventP, 0};
+    CpuInfo cpuInfo0{bus, DBUS_P0_OBJECT_NAME, eventP, 0, &dispatcher};
 
     std::optional<sdbusplus::server::manager_t> manager1;
     std::optional<CpuInfo> cpuInfo1;
@@ -91,7 +126,7 @@ int main()
     if (cpuCount == SOCKET_2)
     {
         manager1.emplace(bus, DBUS_P1_OBJECT_NAME);
-        cpuInfo1.emplace(bus, DBUS_P1_OBJECT_NAME, eventP, 1);
+        cpuInfo1.emplace(bus, DBUS_P1_OBJECT_NAME, eventP, 1, &dispatcher);
     }
 
     try

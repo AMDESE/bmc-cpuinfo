@@ -5,7 +5,13 @@ After=mapper-wait@-xyz-openbmc_project-inventory.service
 After=amd-host-mgr.service
 
 [Service]
-ExecStartPre=/bin/sh -c '\
+# The APML-wait below can be interrupted by SIGTERM when the unit is stopped
+# or replaced before APML is ready (e.g. BMC reboot/firmware update while the
+# host is still off). Trap TERM to exit 0 so this pre-start shell does not make
+# systemd mark the unit 'failed' (a spurious "exited unsuccessfully" event-log
+# entry). The cpu-info daemon itself handles SIGTERM and exits 0, so no
+# SuccessExitStatus override is needed.
+ExecStartPre=/bin/sh -c 'trap "exit 0" TERM; \
 if [ -e /sys/bus/i3c/devices/14c25000.i3c5 ]; then \
   while [ ! -f /var/run/apml_comm_active_0 ] && [ ! -f /var/run/apml_comm_active_1 ]; do sleep 1; done; \
 else \
@@ -15,9 +21,11 @@ fi'
 ExecStart=/usr/bin/cpu-info
 Restart=always
 RestartSec=10
+# No [Install]/WantedBy: cpu-info must NOT auto-start at BMC boot. Its lifecycle
+# is owned by amd-host-mgr's state managers, which start it on host power-on
+# once APML/PMFW is ready (s0-state-mgr) and stop it on host power-off
+# (s5-state-mgr). Auto-starting at boot with the host off would block in
+# ExecStartPre waiting for APML and churn on Restart=always.
 SyslogIdentifier=cpu-info
 Type=simple
-
-[Install]
-WantedBy=multi-user.target
 

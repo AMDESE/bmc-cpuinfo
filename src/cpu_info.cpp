@@ -2,6 +2,9 @@
 
 #include <linux/ioctl.h>
 #include <linux/types.h>
+#include <sys/epoll.h>
+
+#include <cerrno>
 
 #include <boost/asio.hpp>
 #include <boost/asio/error.hpp>
@@ -65,6 +68,97 @@ const std::string P0_Present = "P0_PRESENT_L";
 const std::string P1_Present = "P1_PRESENT_L";
 
 CpuInfoDataHolder* CpuInfoDataHolder::instance = 0;
+
+EventLoopDispatcher::~EventLoopDispatcher()
+{
+    if (source)
+    {
+        source = sd_event_source_unref(source);
+    }
+    if (eventFd >= 0)
+    {
+        close(eventFd);
+        eventFd = -1;
+    }
+}
+
+int EventLoopDispatcher::init(sd_event* event)
+{
+    eventFd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (eventFd < 0)
+    {
+        sd_journal_print(LOG_ERR, "Failed to create dispatcher eventfd: %d\n",
+                         errno);
+        return -errno;
+    }
+
+    int ret = sd_event_add_io(event, &source, eventFd, EPOLLIN,
+                              &EventLoopDispatcher::onEvent, this);
+    if (ret < 0)
+    {
+        sd_journal_print(LOG_ERR,
+                         "Failed to register dispatcher eventfd source: %d\n",
+                         ret);
+        close(eventFd);
+        eventFd = -1;
+        return ret;
+    }
+
+    return 0;
+}
+
+void EventLoopDispatcher::post(std::function<void()> task)
+{
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        tasks.push(std::move(task));
+    }
+
+    // Wake up the event loop. eventfd is a running counter; a single write
+    // is sufficient to make the loop dispatch onEvent, which drains all
+    // queued tasks.
+    uint64_t value = 1;
+    if (eventFd >= 0)
+    {
+        ssize_t rc = write(eventFd, &value, sizeof(value));
+        if (rc != sizeof(value))
+        {
+            sd_journal_print(LOG_ERR,
+                             "Failed to signal dispatcher eventfd: %zd\n", rc);
+        }
+    }
+}
+
+int EventLoopDispatcher::onEvent(sd_event_source* /*source*/, int fd,
+                                 uint32_t /*revents*/, void* userdata)
+{
+    auto* self = static_cast<EventLoopDispatcher*>(userdata);
+
+    // Clear the eventfd counter.
+    uint64_t value = 0;
+    ssize_t rc = read(fd, &value, sizeof(value));
+    (void)rc;
+
+    // Move the queued tasks out under the lock, then run them without holding
+    // it (a task may itself post more work).
+    std::queue<std::function<void()>> pending;
+    {
+        std::lock_guard<std::mutex> lock(self->mutex);
+        std::swap(pending, self->tasks);
+    }
+
+    while (!pending.empty())
+    {
+        auto& task = pending.front();
+        if (task)
+        {
+            task();
+        }
+        pending.pop();
+    }
+
+    return 0;
+}
 
 uint8_t p0_info = 0;
 uint8_t p1_info = 1;
@@ -163,14 +257,14 @@ bool CpuInfo::connect_apml_get_family_model_step(uint8_t soc_num)
         if (cpuPresence == 1)
         {
             // set false -Absent if GPIO value is high
-            present(false);
+            postToBus([this]() { present(false); });
             sd_journal_print(LOG_INFO, "Warning : %d CPU is absent \n",
                              soc_num);
             return false;
         }
         else
         {
-            present(true);
+            postToBus([this]() { present(true); });
         }
 
         if (ret != 0)
@@ -181,32 +275,32 @@ bool CpuInfo::connect_apml_get_family_model_step(uint8_t soc_num)
         else
         {
             ext_family = ((eax >> EAX_DATA_LEN_4) & EAX_MASK_MAGIC_2);
-            effectiveFamily(ext_family);
+            postToBus([this, ext_family]() { effectiveFamily(ext_family); });
 
             char cpuid[CMD_BUFF_LEN] = {0};
             family_id = ((eax >> EAX_DATA_LEN_2) & EAX_MASK_MAGIC_1) +
                         ext_family;
             sprintf(cpuid, "%x (%d)", family_id, family_id);
             std::string family_str(cpuid);
-            family(family_str);
+            postToBus([this, family_str]() { family(family_str); });
 
             ext_model = ((eax >> EAX_DATA_LEN_3) & EAX_MASK_MAGIC_1);
-            effectiveModel(ext_model);
+            postToBus([this, ext_model]() { effectiveModel(ext_model); });
 
             char cpuid_m[CMD_BUFF_LEN] = {0};
             model_id = ext_model * EAX_MASK_MAGIC_3 +
                        ((eax >> EAX_DATA_LEN_1) & EAX_MASK_MAGIC_1);
             sprintf(cpuid_m, "%x (%d)", model_id, model_id);
             std::string model_str(cpuid);
-            model(model_str);
+            postToBus([this, model_str]() { model(model_str); });
 
             step_id = eax & EAX_MASK_MAGIC_1;
-            step(step_id);
+            postToBus([this, step_id]() { step(step_id); });
 
             char cpuid_soc[CMD_BUFF_LEN] = {0};
             sprintf(cpuid_soc, "%d", soc_num);
             std::string socket_str(cpuid_soc);
-            socket(socket_str);
+            postToBus([this, socket_str]() { socket(socket_str); });
 
             return true;
         }
@@ -370,8 +464,9 @@ void CpuInfo::get_opn(uint8_t soc_num)
     std::string opn_str(OpnChar);
     sd_journal_print(LOG_INFO, "OPN string # %s \n", opn_str.c_str());
 
-    // set the value in DBUS
-    partNumber(opn_str);
+    // set the value in DBUS (on the event-loop thread; a bus connection must
+    // not be accessed concurrently from multiple threads)
+    postToBus([this, opn_str]() { partNumber(opn_str); });
 }
 
 // Read register thru apml lib
@@ -427,8 +522,10 @@ u_int8_t CpuInfo::get_reg_offset_conv(uint32_t reg, uint32_t offset,
 
 void CpuInfo::set_general_info()
 {
-    manufacturer("AMD");
-    vendorId("AuthenticAMD");
+    postToBus([this]() {
+        manufacturer("AMD");
+        vendorId("AuthenticAMD");
+    });
 }
 
 // Get processor threads per Core and Socket
@@ -447,7 +544,9 @@ void CpuInfo::get_threads_per_core_and_soc(uint8_t soc_num)
         }
         else
         {
-            threadCount(threads_per_soc);
+            postToBus([this, threads_per_soc]() {
+                threadCount(threads_per_soc);
+            });
             isthreadcall_pass = true;
         }
         usleep(APML_SLEEP);
@@ -463,7 +562,7 @@ void CpuInfo::get_threads_per_core_and_soc(uint8_t soc_num)
             if (isthreadcall_pass)
             {
                 uint32_t TotalCores = threads_per_soc / threads_per_core;
-                coreCount(TotalCores);
+                postToBus([this, TotalCores]() { coreCount(TotalCores); });
             }
         }
     }
@@ -494,7 +593,7 @@ void CpuInfo::get_cpu_base_freq(uint8_t soc_num)
         return;
     }
 
-    maxSpeedInMhz(buffer);
+    postToBus([this, buffer]() { maxSpeedInMhz(buffer); });
 }
 
 // Get PPIN then we need to Decode to get Serial Number
@@ -510,7 +609,7 @@ void CpuInfo::get_ppin_fuse(uint8_t soc_num)
     }
     else
     {
-        id(data);
+        postToBus([this, data]() { id(data); });
         if(data != 0)
         {
             decode_PPIN(data);
@@ -531,7 +630,7 @@ void CpuInfo::get_microcode_rev(uint8_t soc_num)
             return;
         }
         sd_journal_print(LOG_INFO, "|ucode revision  | 0x%-32x |\n", ucode);
-        microcode(ucode);
+        postToBus([this, ucode]() { microcode(ucode); });
     }
     catch (std::exception& e)
     {
@@ -662,7 +761,7 @@ void CpuInfo::decode_PPIN(uint64_t data)
     // serial Number = lotstring + month + year + devnum
     serialnumstr = markedlotstr + datemonthlotstr;
 
-    serialNumber(serialnumstr.c_str());
+    postToBus([this, serialnumstr]() { serialNumber(serialnumstr); });
 
     return;
 }
