@@ -162,13 +162,6 @@ int EventLoopDispatcher::onEvent(sd_event_source* /*source*/, int fd,
     return 0;
 }
 
-uint8_t p0_info = 0;
-uint8_t p1_info = 1;
-uint32_t eax;
-uint32_t ebx;
-uint32_t ecx;
-uint32_t edx;
-
 // Init CPU Information using OOB library
 void CpuInfo::collect_cpu_information(uint8_t soc_num)
 {
@@ -311,10 +304,10 @@ bool CpuInfo::connect_apml_get_family_model_step(uint8_t soc_num)
     uint16_t ext_model;
     uint16_t cpuPresence;
     int core_id = 0;
-    ebx = 0;
-    edx = 0;
-    eax = EAX_VAL;
-    ecx = 0;
+    uint32_t eax = EAX_VAL;
+    uint32_t ebx = 0;
+    uint32_t ecx = 0;
+    uint32_t edx = 0;
     try
     {
         while (retry < MAX_RETRY)
