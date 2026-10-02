@@ -364,7 +364,7 @@ bool CpuInfo::connect_apml_get_family_model_step(uint8_t soc_num)
             model_id = ext_model * EAX_MASK_MAGIC_3 +
                        ((eax >> EAX_DATA_LEN_1) & EAX_MASK_MAGIC_1);
             sprintf(cpuid_m, "%x (%d)", model_id, model_id);
-            std::string model_str(cpuid);
+            std::string model_str(cpuid_m);
             postToBus([this, model_str]() { model(model_str); });
 
             step_id = eax & EAX_MASK_MAGIC_1;
