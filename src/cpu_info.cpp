@@ -15,6 +15,8 @@
 
 #include <filesystem>
 
+#include <nlohmann/json.hpp>
+
 #include "iomanip"
 
 extern "C"
@@ -178,6 +180,84 @@ void CpuInfo::collect_cpu_information(uint8_t soc_num)
         get_threads_per_core_and_soc(soc_num);
         get_microcode_rev(soc_num);
         get_opn(soc_num);
+    }
+
+    // Posted last so this runs after the property setters queued above.
+    postToBus([this]() { writeCpuInfoFile(); });
+}
+
+void CpuInfo::writeCpuInfoFile()
+{
+    nlohmann::json capabilities = nlohmann::json::array();
+    for (const auto& capability : characteristics())
+    {
+        capabilities.push_back(convertCapabilityToString(capability));
+    }
+
+    nlohmann::json info;
+    info["BuildDate"] = buildDate();
+    info["Characteristics"] = std::move(capabilities);
+    info["CoreCount"] = coreCount();
+    info["EffectiveFamily"] = effectiveFamily();
+    info["EffectiveModel"] = effectiveModel();
+    info["Family"] = family();
+    info["Id"] = id();
+    info["Manufacturer"] = manufacturer();
+    info["MaxSpeedInMhz"] = maxSpeedInMhz();
+    info["Microcode"] = microcode();
+    info["Model"] = model();
+    info["PartNumber"] = partNumber();
+    info["Present"] = present();
+    info["PrettyName"] = prettyName();
+    info["SerialNumber"] = serialNumber();
+    info["Socket"] = socket();
+    info["SparePartNumber"] = sparePartNumber();
+    info["Step"] = step();
+    info["SubModel"] = subModel();
+    info["ThreadCount"] = threadCount();
+    info["VendorId"] = vendorId();
+
+    const std::filesystem::path path =
+        std::filesystem::path(CPU_INFO_DIRECTORY) /
+        ("p" + std::to_string(soc_num) + ".json");
+    const std::filesystem::path tmp{path.string() + ".tmp"};
+    const auto removeTempFile = [&tmp]() {
+        std::error_code ec;
+        std::filesystem::remove(tmp, ec);
+        if (ec)
+        {
+            sd_journal_print(LOG_ERR, "Failed to remove %s: %s\n", tmp.c_str(),
+                             ec.message().c_str());
+        }
+    };
+
+    try
+    {
+        {
+            std::ofstream out(tmp);
+            if (!out)
+            {
+                sd_journal_print(LOG_ERR, "Failed to open %s for write\n",
+                                 tmp.c_str());
+                removeTempFile();
+                return;
+            }
+            out << info.dump(4) << '\n';
+            out.close();
+            if (!out)
+            {
+                sd_journal_print(LOG_ERR, "Failed to write %s\n", tmp.c_str());
+                removeTempFile();
+                return;
+            }
+        }
+        std::filesystem::rename(tmp, path);
+    }
+    catch (const std::exception& e)
+    {
+        removeTempFile();
+        sd_journal_print(LOG_ERR, "Failed to store CPU info in %s: %s\n",
+                         path.c_str(), e.what());
     }
 }
 

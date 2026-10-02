@@ -36,6 +36,8 @@
 #define OPN_LENGTH (47)
 #define PARTNUMBER "PartNumber"
 
+const static constexpr char* CPU_INFO_DIRECTORY = "/var/lib/cpu-info";
+
 const static constexpr char* CpuInfoName = "CpuInfo";
 const static constexpr char* CpuInfoEnableName = "CpuInfoEnable";
 
@@ -196,6 +198,9 @@ struct CpuInfo :
             dispatcher->post(std::move(task));
         }
     }
+
+    // Persist the current D-Bus property values for this socket.
+    void writeCpuInfoFile();
 
     // oob-lib functions
     void collect_cpu_information(uint8_t);

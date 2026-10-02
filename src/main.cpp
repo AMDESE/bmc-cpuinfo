@@ -1,6 +1,7 @@
 #include <pthread.h>
 
 #include <csignal>
+#include <filesystem>
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -111,6 +112,15 @@ int main()
     // rather than a signal-kill that systemd would report as a failure.
     (void)sd_event_add_signal(eventP.get(), nullptr, SIGTERM, nullptr, nullptr);
     (void)sd_event_add_signal(eventP.get(), nullptr, SIGINT, nullptr, nullptr);
+
+    std::error_code dirEc;
+    std::filesystem::create_directories(CPU_INFO_DIRECTORY, dirEc);
+    if (dirEc)
+    {
+        sd_journal_print(LOG_ERR,
+                         "Failed to create %s: %s\n", CPU_INFO_DIRECTORY,
+                         dirEc.message().c_str());
+    }
 
     sdbusplus::bus::bus bus = sdbusplus::bus::new_default();
     bus.request_name(DBUS_SERVICE_NAME);
