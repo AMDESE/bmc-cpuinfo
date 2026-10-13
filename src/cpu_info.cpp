@@ -396,7 +396,7 @@ void CpuInfo::get_opn(uint8_t soc_num)
     uint32_t thread_ind = 0;
     uint32_t eax_value, ebx_value, ecx_value, edx_value;
     u_int8_t write_opn_data[OPN_LENGTH] = {0};
-    char OpnChar[OPN_LENGTH] = {0};
+    char OpnChar[OPN_LENGTH + 1] = {0};
 
     cpuid_fn = CPUID_Fn8000002;
     if (read_register(soc_num, thread_ind, cpuid_fn, cpuid_extd_fn, &eax_value,
