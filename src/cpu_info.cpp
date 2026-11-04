@@ -15,6 +15,8 @@
 
 #include <filesystem>
 
+#include <nlohmann/json.hpp>
+
 #include "iomanip"
 
 extern "C"
@@ -160,13 +162,6 @@ int EventLoopDispatcher::onEvent(sd_event_source* /*source*/, int fd,
     return 0;
 }
 
-uint8_t p0_info = 0;
-uint8_t p1_info = 1;
-uint32_t eax;
-uint32_t ebx;
-uint32_t ecx;
-uint32_t edx;
-
 // Init CPU Information using OOB library
 void CpuInfo::collect_cpu_information(uint8_t soc_num)
 {
@@ -178,6 +173,84 @@ void CpuInfo::collect_cpu_information(uint8_t soc_num)
         get_threads_per_core_and_soc(soc_num);
         get_microcode_rev(soc_num);
         get_opn(soc_num);
+    }
+
+    // Posted last so this runs after the property setters queued above.
+    postToBus([this]() { writeCpuInfoFile(); });
+}
+
+void CpuInfo::writeCpuInfoFile()
+{
+    nlohmann::json capabilities = nlohmann::json::array();
+    for (const auto& capability : characteristics())
+    {
+        capabilities.push_back(convertCapabilityToString(capability));
+    }
+
+    nlohmann::json info;
+    info["BuildDate"] = buildDate();
+    info["Characteristics"] = std::move(capabilities);
+    info["CoreCount"] = coreCount();
+    info["EffectiveFamily"] = effectiveFamily();
+    info["EffectiveModel"] = effectiveModel();
+    info["Family"] = family();
+    info["Id"] = id();
+    info["Manufacturer"] = manufacturer();
+    info["MaxSpeedInMhz"] = maxSpeedInMhz();
+    info["Microcode"] = microcode();
+    info["Model"] = model();
+    info["PartNumber"] = partNumber();
+    info["Present"] = present();
+    info["PrettyName"] = prettyName();
+    info["SerialNumber"] = serialNumber();
+    info["Socket"] = socket();
+    info["SparePartNumber"] = sparePartNumber();
+    info["Step"] = step();
+    info["SubModel"] = subModel();
+    info["ThreadCount"] = threadCount();
+    info["VendorId"] = vendorId();
+
+    const std::filesystem::path path =
+        std::filesystem::path(CPU_INFO_DIRECTORY) /
+        ("p" + std::to_string(soc_num) + ".json");
+    const std::filesystem::path tmp{path.string() + ".tmp"};
+    const auto removeTempFile = [&tmp]() {
+        std::error_code ec;
+        std::filesystem::remove(tmp, ec);
+        if (ec)
+        {
+            sd_journal_print(LOG_ERR, "Failed to remove %s: %s\n", tmp.c_str(),
+                             ec.message().c_str());
+        }
+    };
+
+    try
+    {
+        {
+            std::ofstream out(tmp);
+            if (!out)
+            {
+                sd_journal_print(LOG_ERR, "Failed to open %s for write\n",
+                                 tmp.c_str());
+                removeTempFile();
+                return;
+            }
+            out << info.dump(4) << '\n';
+            out.close();
+            if (!out)
+            {
+                sd_journal_print(LOG_ERR, "Failed to write %s\n", tmp.c_str());
+                removeTempFile();
+                return;
+            }
+        }
+        std::filesystem::rename(tmp, path);
+    }
+    catch (const std::exception& e)
+    {
+        removeTempFile();
+        sd_journal_print(LOG_ERR, "Failed to store CPU info in %s: %s\n",
+                         path.c_str(), e.what());
     }
 }
 
@@ -231,10 +304,10 @@ bool CpuInfo::connect_apml_get_family_model_step(uint8_t soc_num)
     uint16_t ext_model;
     uint16_t cpuPresence;
     int core_id = 0;
-    ebx = 0;
-    edx = 0;
-    eax = EAX_VAL;
-    ecx = 0;
+    uint32_t eax = EAX_VAL;
+    uint32_t ebx = 0;
+    uint32_t ecx = 0;
+    uint32_t edx = 0;
     try
     {
         while (retry < MAX_RETRY)
@@ -291,7 +364,7 @@ bool CpuInfo::connect_apml_get_family_model_step(uint8_t soc_num)
             model_id = ext_model * EAX_MASK_MAGIC_3 +
                        ((eax >> EAX_DATA_LEN_1) & EAX_MASK_MAGIC_1);
             sprintf(cpuid_m, "%x (%d)", model_id, model_id);
-            std::string model_str(cpuid);
+            std::string model_str(cpuid_m);
             postToBus([this, model_str]() { model(model_str); });
 
             step_id = eax & EAX_MASK_MAGIC_1;
@@ -323,7 +396,7 @@ void CpuInfo::get_opn(uint8_t soc_num)
     uint32_t thread_ind = 0;
     uint32_t eax_value, ebx_value, ecx_value, edx_value;
     u_int8_t write_opn_data[OPN_LENGTH] = {0};
-    char OpnChar[OPN_LENGTH] = {0};
+    char OpnChar[OPN_LENGTH + 1] = {0};
 
     cpuid_fn = CPUID_Fn8000002;
     if (read_register(soc_num, thread_ind, cpuid_fn, cpuid_extd_fn, &eax_value,
