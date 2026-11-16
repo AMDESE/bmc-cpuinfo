@@ -1,0 +1,23 @@
+option(
+    'dbus_p0_object_name',
+    type: 'string',
+    value: '/xyz/openbmc_project/inventory/system/processor/P0',
+    description: 'DBus object name for processor P0'
+)
+option(
+    'dbus_p1_object_name',
+    type: 'string',
+    value: '/xyz/openbmc_project/inventory/system/processor/P1',
+    description: 'DBus object name for processor P1'
+)
+option(
+    'dbus_intf_name',
+    type: 'string',
+    value: 'xyz.openbmc_project.Inventory.Item.Cpu',
+    description: 'DBus interface name for CPU'
+)
+option(
+    'dbus_service_name',
+    type: 'string',
+    value: 'xyz.openbmc_project.Inventory.Item.Cpu_info',
+    description: 'DBus service name for CPU info')

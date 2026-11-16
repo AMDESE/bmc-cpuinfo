@@ -1,36 +1,43 @@
 #include "cpu_info.hpp"
 
-#include "iomanip"
+#include <linux/ioctl.h>
+#include <linux/types.h>
+#include <sys/epoll.h>
+
+#include <cerrno>
+
 #include <boost/asio.hpp>
-#include <boost/asio/spawn.hpp>
 #include <boost/asio/error.hpp>
+#include <boost/asio/spawn.hpp>
+#include <gpiod.hpp>
 #include <sdbusplus/asio/connection.hpp>
 #include <sdbusplus/asio/property.hpp>
-#include <gpiod.hpp>
-#include <filesystem>
-#include <linux/types.h>
-#include <linux/ioctl.h>
 
-extern "C" {
-#include <unistd.h>
-#include "linux/i2c-dev.h"
-#include "i2c/smbus.h"
+#include <filesystem>
+
+#include <nlohmann/json.hpp>
+
+#include "iomanip"
+
+extern "C"
+{
+#include "apml.h"
 #include "apml64Config.h"
 #include "esmi_cpuid_msr.h"
-#include "apml.h"
 #include "esmi_mailbox.h"
 #include "esmi_rmi.h"
-#include "esmi_cpuid_msr.h"
 #include "esmi_tsi.h"
-#include "esmi_mailbox_nda.h"
+#include "i2c/smbus.h"
+#include "linux/i2c-dev.h"
+
+#include <unistd.h>
 }
 
-#define COMMAND_NUM_OF_CPU    ("/sbin/fw_printenv -n num_of_cpu")
-#define COMMAND_LEN         (3)
-#define MAX_RETRY           20
+#define COMMAND_LEN (3)
+#define MAX_RETRY 20
 
-#define CMD_BUFF_LEN     256
-#define FNAME_LEN        128
+#define CMD_BUFF_LEN 256
+#define FNAME_LEN 128
 
 // AMPL command
 #define EAX_VAL 1
@@ -42,7 +49,6 @@ extern "C" {
 #define EAX_MASK_MAGIC_2 0xff
 #define EAX_MASK_MAGIC_3 0x10
 #define APML_SLEEP 10000
-#define MUX_SLEEP 5
 
 // PPIN logic
 #define LOWER_PINBITS 8
@@ -62,37 +68,190 @@ extern "C" {
 
 const std::string P0_Present = "P0_PRESENT_L";
 const std::string P1_Present = "P1_PRESENT_L";
-const std::string DBUS_Present = "Present";
-
-constexpr auto P0_PATH = "/xyz/openbmc_project/inventory/system/processor/P0";
-constexpr auto P1_PATH = "/xyz/openbmc_project/inventory/system/processor/P1";
 
 CpuInfoDataHolder* CpuInfoDataHolder::instance = 0;
 
-uint8_t p0_info = 0;
-uint8_t p1_info = 1;
-uint32_t eax;
-uint32_t ebx;
-uint32_t ecx;
-uint32_t edx;
+EventLoopDispatcher::~EventLoopDispatcher()
+{
+    if (source)
+    {
+        source = sd_event_source_unref(source);
+    }
+    if (eventFd >= 0)
+    {
+        close(eventFd);
+        eventFd = -1;
+    }
+}
+
+int EventLoopDispatcher::init(sd_event* event)
+{
+    eventFd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (eventFd < 0)
+    {
+        sd_journal_print(LOG_ERR, "Failed to create dispatcher eventfd: %d\n",
+                         errno);
+        return -errno;
+    }
+
+    int ret = sd_event_add_io(event, &source, eventFd, EPOLLIN,
+                              &EventLoopDispatcher::onEvent, this);
+    if (ret < 0)
+    {
+        sd_journal_print(LOG_ERR,
+                         "Failed to register dispatcher eventfd source: %d\n",
+                         ret);
+        close(eventFd);
+        eventFd = -1;
+        return ret;
+    }
+
+    return 0;
+}
+
+void EventLoopDispatcher::post(std::function<void()> task)
+{
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        tasks.push(std::move(task));
+    }
+
+    // Wake up the event loop. eventfd is a running counter; a single write
+    // is sufficient to make the loop dispatch onEvent, which drains all
+    // queued tasks.
+    uint64_t value = 1;
+    if (eventFd >= 0)
+    {
+        ssize_t rc = write(eventFd, &value, sizeof(value));
+        if (rc != sizeof(value))
+        {
+            sd_journal_print(LOG_ERR,
+                             "Failed to signal dispatcher eventfd: %zd\n", rc);
+        }
+    }
+}
+
+int EventLoopDispatcher::onEvent(sd_event_source* /*source*/, int fd,
+                                 uint32_t /*revents*/, void* userdata)
+{
+    auto* self = static_cast<EventLoopDispatcher*>(userdata);
+
+    // Clear the eventfd counter.
+    uint64_t value = 0;
+    ssize_t rc = read(fd, &value, sizeof(value));
+    (void)rc;
+
+    // Move the queued tasks out under the lock, then run them without holding
+    // it (a task may itself post more work).
+    std::queue<std::function<void()>> pending;
+    {
+        std::lock_guard<std::mutex> lock(self->mutex);
+        std::swap(pending, self->tasks);
+    }
+
+    while (!pending.empty())
+    {
+        auto& task = pending.front();
+        if (task)
+        {
+            task();
+        }
+        pending.pop();
+    }
+
+    return 0;
+}
 
 // Init CPU Information using OOB library
-void CpuInfo::collect_cpu_information()
+void CpuInfo::collect_cpu_information(uint8_t soc_num)
 {
-
-  for(uint8_t soc_num = 0; soc_num < num_of_proc;  soc_num++)
-  {
-     if (connect_apml_get_family_model_step(soc_num))
-     {
-        set_general_info(soc_num);
+    if (connect_apml_get_family_model_step(soc_num))
+    {
+        set_general_info();
         get_cpu_base_freq(soc_num);
         get_ppin_fuse(soc_num);
         get_threads_per_core_and_soc(soc_num);
         get_microcode_rev(soc_num);
         get_opn(soc_num);
-     }
-  }
+    }
 
+    // Posted last so this runs after the property setters queued above.
+    postToBus([this]() { writeCpuInfoFile(); });
+}
+
+void CpuInfo::writeCpuInfoFile()
+{
+    nlohmann::json capabilities = nlohmann::json::array();
+    for (const auto& capability : characteristics())
+    {
+        capabilities.push_back(convertCapabilityToString(capability));
+    }
+
+    nlohmann::json info;
+    info["BuildDate"] = buildDate();
+    info["Characteristics"] = std::move(capabilities);
+    info["CoreCount"] = coreCount();
+    info["EffectiveFamily"] = effectiveFamily();
+    info["EffectiveModel"] = effectiveModel();
+    info["Family"] = family();
+    info["Id"] = id();
+    info["Manufacturer"] = manufacturer();
+    info["MaxSpeedInMhz"] = maxSpeedInMhz();
+    info["Microcode"] = microcode();
+    info["Model"] = model();
+    info["PartNumber"] = partNumber();
+    info["Present"] = present();
+    info["PrettyName"] = prettyName();
+    info["SerialNumber"] = serialNumber();
+    info["Socket"] = socket();
+    info["SparePartNumber"] = sparePartNumber();
+    info["Step"] = step();
+    info["SubModel"] = subModel();
+    info["ThreadCount"] = threadCount();
+    info["VendorId"] = vendorId();
+
+    const std::filesystem::path path =
+        std::filesystem::path(CPU_INFO_DIRECTORY) /
+        ("p" + std::to_string(soc_num) + ".json");
+    const std::filesystem::path tmp{path.string() + ".tmp"};
+    const auto removeTempFile = [&tmp]() {
+        std::error_code ec;
+        std::filesystem::remove(tmp, ec);
+        if (ec)
+        {
+            sd_journal_print(LOG_ERR, "Failed to remove %s: %s\n", tmp.c_str(),
+                             ec.message().c_str());
+        }
+    };
+
+    try
+    {
+        {
+            std::ofstream out(tmp);
+            if (!out)
+            {
+                sd_journal_print(LOG_ERR, "Failed to open %s for write\n",
+                                 tmp.c_str());
+                removeTempFile();
+                return;
+            }
+            out << info.dump(4) << '\n';
+            out.close();
+            if (!out)
+            {
+                sd_journal_print(LOG_ERR, "Failed to write %s\n", tmp.c_str());
+                removeTempFile();
+                return;
+            }
+        }
+        std::filesystem::rename(tmp, path);
+    }
+    catch (const std::exception& e)
+    {
+        removeTempFile();
+        sd_journal_print(LOG_ERR, "Failed to store CPU info in %s: %s\n",
+                         path.c_str(), e.what());
+    }
 }
 
 int CpuInfo::getGPIOValue(const std::string& name)
@@ -109,11 +268,13 @@ int CpuInfo::getGPIOValue(const std::string& name)
     }
     try
     {
-        gpioLine.request({__FUNCTION__, gpiod::line_request::DIRECTION_INPUT});
+        gpioLine.request(
+            {__FUNCTION__, gpiod::line_request::DIRECTION_INPUT, 0});
     }
     catch (std::system_error& exc)
     {
-        sd_journal_print(LOG_ERR, "Error setting gpio as Input: %s \n", name.c_str());
+        sd_journal_print(LOG_ERR, "Error setting gpio as Input: %s \n",
+                         name.c_str());
         return -1;
     }
 
@@ -123,109 +284,110 @@ int CpuInfo::getGPIOValue(const std::string& name)
     }
     catch (std::system_error& exc)
     {
-        sd_journal_print(LOG_ERR, "Error getting gpio value for: %s \n", name.c_str());
+        sd_journal_print(LOG_ERR, "Error getting gpio value for: %s \n",
+                         name.c_str());
         return -1;
     }
 
     return value;
 }
-//Call Apml library to get the CPU Info
-bool CpuInfo::connect_apml_get_family_model_step(uint8_t soc_num )
+
+// Call Apml library to get the CPU Info
+bool CpuInfo::connect_apml_get_family_model_step(uint8_t soc_num)
 {
     int retry = 0;
     oob_status_t ret;
-    uint32_t family_id;
-    uint32_t model_id;
-    uint32_t step_id;
-    uint32_t ext_family;
-    uint32_t ext_model;
-    int core_id = 0;
-    uint16_t freq;
+    uint16_t family_id;
+    uint16_t model_id;
+    uint16_t step_id;
+    uint16_t ext_family;
+    uint16_t ext_model;
     uint16_t cpuPresence;
-    ebx = 0;
-    edx = 0;
-    eax = EAX_VAL;
-    ecx = 0;
+    int core_id = 0;
+    uint32_t eax = EAX_VAL;
+    uint32_t ebx = 0;
+    uint32_t ecx = 0;
+    uint32_t edx = 0;
     try
     {
-      while(retry < MAX_RETRY)
-      {
-        ret = esmi_oob_cpuid(soc_num, core_id, &eax, &ebx, &ecx, &edx);
-        if(ret != 0)
+        while (retry < MAX_RETRY)
         {
-          sleep(MUX_SLEEP);
-          retry++;
+            ret = esmi_oob_cpuid(soc_num, core_id, &eax, &ebx, &ecx, &edx);
+            if (ret != 0)
+            {
+                usleep(APML_SLEEP);
+                retry++;
+            }
+            else
+            {
+                break;
+            }
+        } // end of retry
+
+        std::string processor_presence =
+            (soc_num == 0) ? P0_Present : P1_Present;
+        cpuPresence = getGPIOValue(processor_presence);
+        if (cpuPresence == 1)
+        {
+            // set false -Absent if GPIO value is high
+            postToBus([this]() { present(false); });
+            sd_journal_print(LOG_INFO, "Warning : %d CPU is absent \n",
+                             soc_num);
+            return false;
         }
         else
         {
-          break;
+            postToBus([this]() { present(true); });
         }
-      }//end of retry
 
-      std::string processor_presence = (soc_num == 0) ? P0_Present: P1_Present;
-      cpuPresence = getGPIOValue(processor_presence);
-      if (cpuPresence == 1)
-      {
-         //set false -Absent if GPIO value is high -default is true
-         set_cpu_bool_value(soc_num, false, DBUS_Present, CPU_INTERFACE);
-         sd_journal_print(LOG_INFO, "Warning : %d CPU is absent \n", soc_num);
-         return false;
-      }
+        if (ret != 0)
+        {
+            sd_journal_print(LOG_ERR,
+                             "Error : Unable to get the CPU info from APML \n");
+        }
+        else
+        {
+            ext_family = ((eax >> EAX_DATA_LEN_4) & EAX_MASK_MAGIC_2);
+            postToBus([this, ext_family]() { effectiveFamily(ext_family); });
 
-      if(ret != 0)
-      {
-        sd_journal_print(LOG_ERR, "Error : Unable to get the CPU info from APML \n" );
-      }
-      else
-      {
-        char cpuid[CMD_BUFF_LEN] = {0};
+            char cpuid[CMD_BUFF_LEN] = {0};
+            family_id = ((eax >> EAX_DATA_LEN_2) & EAX_MASK_MAGIC_1) +
+                        ext_family;
+            sprintf(cpuid, "%x (%d)", family_id, family_id);
+            std::string family_str(cpuid);
+            postToBus([this, family_str]() { family(family_str); });
 
-        ext_family = ((eax >> EAX_DATA_LEN_4) & EAX_MASK_MAGIC_2);
-        sprintf(cpuid, "%x (%d)", ext_family, ext_family);
-        //convert char to string
-        std::string eff_family_str(cpuid);
-        set_cpu_string_value(soc_num, eff_family_str, "EffectiveFamily", CPU_INTERFACE);
+            ext_model = ((eax >> EAX_DATA_LEN_3) & EAX_MASK_MAGIC_1);
+            postToBus([this, ext_model]() { effectiveModel(ext_model); });
 
-        cpuid[CMD_BUFF_LEN] = {0};
-        family_id = ((eax >> EAX_DATA_LEN_2) & EAX_MASK_MAGIC_1) + ext_family;
-        sprintf(cpuid, "%x (%d)", family_id, family_id);
-        std::string family_str(cpuid);
-        set_cpu_string_value(soc_num, family_str, "Family", CPU_INTERFACE);
+            char cpuid_m[CMD_BUFF_LEN] = {0};
+            model_id = ext_model * EAX_MASK_MAGIC_3 +
+                       ((eax >> EAX_DATA_LEN_1) & EAX_MASK_MAGIC_1);
+            sprintf(cpuid_m, "%x (%d)", model_id, model_id);
+            std::string model_str(cpuid_m);
+            postToBus([this, model_str]() { model(model_str); });
 
-        cpuid[CMD_BUFF_LEN] = {0};
-        ext_model = ((eax >> EAX_DATA_LEN_3) & EAX_MASK_MAGIC_1);
-        sprintf(cpuid, "%x (%d)", ext_model, ext_model);
-        std::string eff_model_str(cpuid);
-        set_cpu_string_value(soc_num, eff_model_str, "EffectiveModel", CPU_INTERFACE);
+            step_id = eax & EAX_MASK_MAGIC_1;
+            postToBus([this, step_id]() { step(step_id); });
 
-        cpuid[CMD_BUFF_LEN] = {0};
-        model_id = ext_model * EAX_MASK_MAGIC_3 + ((eax >> EAX_DATA_LEN_1) & EAX_MASK_MAGIC_1);
-        sprintf(cpuid, "%x (%d)", model_id, model_id);
-        std::string model_str(cpuid);
-        set_cpu_string_value(soc_num, model_str, "Model", CPU_INTERFACE);
+            char cpuid_soc[CMD_BUFF_LEN] = {0};
+            sprintf(cpuid_soc, "%d", soc_num);
+            std::string socket_str(cpuid_soc);
+            postToBus([this, socket_str]() { socket(socket_str); });
 
-        cpuid[CMD_BUFF_LEN] = {0};
-        step_id = eax & EAX_MASK_MAGIC_1 ;
-        sprintf(cpuid, "%x (%d)", step_id, step_id);
-        std::string step_str(cpuid);
-        set_cpu_string_value(soc_num, step_str, "Step", CPU_INTERFACE);
-
-        cpuid[CMD_BUFF_LEN] = {0};
-        sprintf(cpuid, "%d", soc_num);
-        std::string socket_str(cpuid);
-        set_cpu_string_value(soc_num, socket_str, "Socket", CPU_INTERFACE);
-
-        return true;
-      }
+            return true;
+        }
     }
     catch (std::exception& e)
     {
-       sd_journal_print(LOG_ERR, "Error getting CPU Model, Family and Step value \n");
-       return false;
+        sd_journal_print(LOG_ERR,
+                         "Error getting CPU Model, Family and Step value \n");
+        return false;
     }
 
     return false;
 }
+
 // Get the OPN
 void CpuInfo::get_opn(uint8_t soc_num)
 {
@@ -234,158 +396,212 @@ void CpuInfo::get_opn(uint8_t soc_num)
     uint32_t thread_ind = 0;
     uint32_t eax_value, ebx_value, ecx_value, edx_value;
     u_int8_t write_opn_data[OPN_LENGTH] = {0};
-    char OpnChar [OPN_LENGTH] = {0};
+    char OpnChar[OPN_LENGTH + 1] = {0};
 
     cpuid_fn = CPUID_Fn8000002;
-    if(read_register(soc_num, thread_ind, cpuid_fn, cpuid_extd_fn, &eax_value, &ebx_value, &ecx_value, &edx_value))
+    if (read_register(soc_num, thread_ind, cpuid_fn, cpuid_extd_fn, &eax_value,
+                      &ebx_value, &ecx_value, &edx_value))
     {
-        //eax
+        // eax
         write_opn_data[0] = (eax_value & MASK_TWO_BYTES);
-        write_opn_data[1] = get_reg_offset_conv(eax_value, SHIFT_8,  MASK_BYTE_2);
-        write_opn_data[2] = get_reg_offset_conv(eax_value, SHIFT_16, MASK_BYTE_3);
-        write_opn_data[3] = get_reg_offset_conv(eax_value, SHIFT_24, MASK_BYTE_4);
-        //ebx
+        write_opn_data[1] =
+            get_reg_offset_conv(eax_value, SHIFT_8, MASK_BYTE_2);
+        write_opn_data[2] =
+            get_reg_offset_conv(eax_value, SHIFT_16, MASK_BYTE_3);
+        write_opn_data[3] =
+            get_reg_offset_conv(eax_value, SHIFT_24, MASK_BYTE_4);
+        // ebx
         write_opn_data[4] = (ebx_value & MASK_TWO_BYTES);
-        write_opn_data[5] = get_reg_offset_conv(ebx_value, SHIFT_8,  MASK_BYTE_2);
-        write_opn_data[6] = get_reg_offset_conv(ebx_value, SHIFT_16, MASK_BYTE_3);
-        write_opn_data[7] = get_reg_offset_conv(ebx_value, SHIFT_24, MASK_BYTE_4);
-        //ecx
+        write_opn_data[5] =
+            get_reg_offset_conv(ebx_value, SHIFT_8, MASK_BYTE_2);
+        write_opn_data[6] =
+            get_reg_offset_conv(ebx_value, SHIFT_16, MASK_BYTE_3);
+        write_opn_data[7] =
+            get_reg_offset_conv(ebx_value, SHIFT_24, MASK_BYTE_4);
+        // ecx
         write_opn_data[8] = (ecx_value & MASK_TWO_BYTES);
-        write_opn_data[9] = get_reg_offset_conv(ecx_value, SHIFT_8,  MASK_BYTE_2);
-        write_opn_data[10] = get_reg_offset_conv(ecx_value, SHIFT_16, MASK_BYTE_3);
-        write_opn_data[11] = get_reg_offset_conv(ecx_value, SHIFT_24, MASK_BYTE_4);
-        //edx
+        write_opn_data[9] =
+            get_reg_offset_conv(ecx_value, SHIFT_8, MASK_BYTE_2);
+        write_opn_data[10] =
+            get_reg_offset_conv(ecx_value, SHIFT_16, MASK_BYTE_3);
+        write_opn_data[11] =
+            get_reg_offset_conv(ecx_value, SHIFT_24, MASK_BYTE_4);
+        // edx
         write_opn_data[12] = (edx_value & MASK_TWO_BYTES);
-        write_opn_data[13] = get_reg_offset_conv(edx_value, SHIFT_8,  MASK_BYTE_2);
-        write_opn_data[14] = get_reg_offset_conv(edx_value, SHIFT_16, MASK_BYTE_3);
-        write_opn_data[15] = get_reg_offset_conv(edx_value, SHIFT_24, MASK_BYTE_4);
+        write_opn_data[13] =
+            get_reg_offset_conv(edx_value, SHIFT_8, MASK_BYTE_2);
+        write_opn_data[14] =
+            get_reg_offset_conv(edx_value, SHIFT_16, MASK_BYTE_3);
+        write_opn_data[15] =
+            get_reg_offset_conv(edx_value, SHIFT_24, MASK_BYTE_4);
     }
     else
     {
-        sd_journal_print(LOG_ERR, "Failed to read 0x80000002 register value \n");
+        sd_journal_print(LOG_ERR,
+                         "Failed to read 0x80000002 register value \n");
         return;
     }
 
     cpuid_fn = CPUID_Fn8000003;
-    if(read_register(soc_num, thread_ind, cpuid_fn, cpuid_extd_fn, &eax_value, &ebx_value, &ecx_value, &edx_value))
+    if (read_register(soc_num, thread_ind, cpuid_fn, cpuid_extd_fn, &eax_value,
+                      &ebx_value, &ecx_value, &edx_value))
     {
-        //eax
+        // eax
         write_opn_data[16] = (eax_value & MASK_TWO_BYTES);
-        write_opn_data[17] = get_reg_offset_conv(eax_value, SHIFT_8,  MASK_BYTE_2);
-        write_opn_data[18] = get_reg_offset_conv(eax_value, SHIFT_16, MASK_BYTE_3);
-        write_opn_data[19] = get_reg_offset_conv(eax_value, SHIFT_24, MASK_BYTE_4);
-        //ebx
+        write_opn_data[17] =
+            get_reg_offset_conv(eax_value, SHIFT_8, MASK_BYTE_2);
+        write_opn_data[18] =
+            get_reg_offset_conv(eax_value, SHIFT_16, MASK_BYTE_3);
+        write_opn_data[19] =
+            get_reg_offset_conv(eax_value, SHIFT_24, MASK_BYTE_4);
+        // ebx
         write_opn_data[20] = (ebx_value & MASK_TWO_BYTES);
-        write_opn_data[21] = get_reg_offset_conv(ebx_value, SHIFT_8,  MASK_BYTE_2);
-        write_opn_data[22] = get_reg_offset_conv(ebx_value, SHIFT_16, MASK_BYTE_3);
-        write_opn_data[23] = get_reg_offset_conv(ebx_value, SHIFT_24, MASK_BYTE_4);
-        //ecx
+        write_opn_data[21] =
+            get_reg_offset_conv(ebx_value, SHIFT_8, MASK_BYTE_2);
+        write_opn_data[22] =
+            get_reg_offset_conv(ebx_value, SHIFT_16, MASK_BYTE_3);
+        write_opn_data[23] =
+            get_reg_offset_conv(ebx_value, SHIFT_24, MASK_BYTE_4);
+        // ecx
         write_opn_data[24] = (ecx_value & MASK_TWO_BYTES);
-        write_opn_data[25] = get_reg_offset_conv(ecx_value, SHIFT_8,  MASK_BYTE_2);
-        write_opn_data[26] = get_reg_offset_conv(ecx_value, SHIFT_16, MASK_BYTE_3);
-        write_opn_data[27] = get_reg_offset_conv(ecx_value, SHIFT_24, MASK_BYTE_4);
-        //edx
+        write_opn_data[25] =
+            get_reg_offset_conv(ecx_value, SHIFT_8, MASK_BYTE_2);
+        write_opn_data[26] =
+            get_reg_offset_conv(ecx_value, SHIFT_16, MASK_BYTE_3);
+        write_opn_data[27] =
+            get_reg_offset_conv(ecx_value, SHIFT_24, MASK_BYTE_4);
+        // edx
         write_opn_data[28] = (edx_value & MASK_TWO_BYTES);
-        write_opn_data[29] = get_reg_offset_conv(edx_value, SHIFT_8,  MASK_BYTE_2);
-        write_opn_data[30] = get_reg_offset_conv(edx_value, SHIFT_16, MASK_BYTE_3);
-        write_opn_data[31] = get_reg_offset_conv(edx_value, SHIFT_24, MASK_BYTE_4);
+        write_opn_data[29] =
+            get_reg_offset_conv(edx_value, SHIFT_8, MASK_BYTE_2);
+        write_opn_data[30] =
+            get_reg_offset_conv(edx_value, SHIFT_16, MASK_BYTE_3);
+        write_opn_data[31] =
+            get_reg_offset_conv(edx_value, SHIFT_24, MASK_BYTE_4);
     }
     else
     {
-        sd_journal_print(LOG_ERR, "Failed to read 0x80000003 register value \n");
+        sd_journal_print(LOG_ERR,
+                         "Failed to read 0x80000003 register value \n");
         return;
     }
 
     cpuid_fn = CPUID_Fn8000004;
-    if(read_register(soc_num, thread_ind, cpuid_fn, cpuid_extd_fn, &eax_value, &ebx_value, &ecx_value, &edx_value))
+    if (read_register(soc_num, thread_ind, cpuid_fn, cpuid_extd_fn, &eax_value,
+                      &ebx_value, &ecx_value, &edx_value))
     {
         write_opn_data[32] = (eax_value & MASK_TWO_BYTES);
-        write_opn_data[33] = get_reg_offset_conv(eax_value, SHIFT_8,  MASK_BYTE_2);
-        write_opn_data[34] = get_reg_offset_conv(eax_value, SHIFT_16, MASK_BYTE_3);
-        write_opn_data[35] = get_reg_offset_conv(eax_value, SHIFT_24, MASK_BYTE_4);
-        //ebx
+        write_opn_data[33] =
+            get_reg_offset_conv(eax_value, SHIFT_8, MASK_BYTE_2);
+        write_opn_data[34] =
+            get_reg_offset_conv(eax_value, SHIFT_16, MASK_BYTE_3);
+        write_opn_data[35] =
+            get_reg_offset_conv(eax_value, SHIFT_24, MASK_BYTE_4);
+        // ebx
         write_opn_data[36] = (ebx_value & MASK_TWO_BYTES);
-        write_opn_data[37] = get_reg_offset_conv(ebx_value, SHIFT_8,  MASK_BYTE_2);
-        write_opn_data[38] = get_reg_offset_conv(ebx_value, SHIFT_16, MASK_BYTE_3);
-        write_opn_data[39] = get_reg_offset_conv(ebx_value, SHIFT_24, MASK_BYTE_4);
-        //ecx
+        write_opn_data[37] =
+            get_reg_offset_conv(ebx_value, SHIFT_8, MASK_BYTE_2);
+        write_opn_data[38] =
+            get_reg_offset_conv(ebx_value, SHIFT_16, MASK_BYTE_3);
+        write_opn_data[39] =
+            get_reg_offset_conv(ebx_value, SHIFT_24, MASK_BYTE_4);
+        // ecx
         write_opn_data[40] = (ecx_value & MASK_TWO_BYTES);
-        write_opn_data[41] = get_reg_offset_conv(ecx_value, SHIFT_8,  MASK_BYTE_2);
-        write_opn_data[42] = get_reg_offset_conv(ecx_value, SHIFT_16, MASK_BYTE_3);
-        write_opn_data[43] = get_reg_offset_conv(ecx_value, SHIFT_24, MASK_BYTE_4);
-        //edx
+        write_opn_data[41] =
+            get_reg_offset_conv(ecx_value, SHIFT_8, MASK_BYTE_2);
+        write_opn_data[42] =
+            get_reg_offset_conv(ecx_value, SHIFT_16, MASK_BYTE_3);
+        write_opn_data[43] =
+            get_reg_offset_conv(ecx_value, SHIFT_24, MASK_BYTE_4);
+        // edx
         write_opn_data[44] = (edx_value & MASK_TWO_BYTES);
-        write_opn_data[45] = get_reg_offset_conv(edx_value, SHIFT_8,  MASK_BYTE_2);
-        write_opn_data[46] = get_reg_offset_conv(edx_value, SHIFT_16, MASK_BYTE_3);
+        write_opn_data[45] =
+            get_reg_offset_conv(edx_value, SHIFT_8, MASK_BYTE_2);
+        write_opn_data[46] =
+            get_reg_offset_conv(edx_value, SHIFT_16, MASK_BYTE_3);
     }
     else
     {
-        sd_journal_print(LOG_ERR, "Failed to read 0x80000004 register value \n");
+        sd_journal_print(LOG_ERR,
+                         "Failed to read 0x80000004 register value \n");
         return;
     }
 
-    //convert hex to ascii
+    // convert hex to ascii
     for (int i = 0; i < OPN_LENGTH; i++)
     {
-       OpnChar[i] = (char) write_opn_data[i];
+        OpnChar[i] = (char)write_opn_data[i];
     }
 
-    //convert char to opn string
+    // convert char to opn string
     std::string opn_str(OpnChar);
     sd_journal_print(LOG_INFO, "OPN string # %s \n", opn_str.c_str());
 
-    //set the value in DBUS
-    set_cpu_string_value(soc_num, opn_str, PARTNUMBER, ASSET_INTERFACE);
-
+    // set the value in DBUS (on the event-loop thread; a bus connection must
+    // not be accessed concurrently from multiple threads)
+    postToBus([this, opn_str]() { partNumber(opn_str); });
 }
+
 // Read register thru apml lib
-bool CpuInfo::read_register(uint8_t soc_num, uint32_t thread_ind, uint32_t cpuid_fn, uint32_t cpuid_extd_fn, uint32_t *eax_value, uint32_t *ebx_value, uint32_t *ecx_value, uint32_t *edx_value)
+bool CpuInfo::read_register(uint8_t soc_num, uint32_t thread_ind,
+                            uint32_t cpuid_fn, uint32_t cpuid_extd_fn,
+                            uint32_t* eax_value, uint32_t* ebx_value,
+                            uint32_t* ecx_value, uint32_t* edx_value)
 {
     bool ret = false;
-    if(OOB_SUCCESS == esmi_oob_cpuid_eax(soc_num, thread_ind, cpuid_fn, cpuid_extd_fn, eax_value))
+    if (OOB_SUCCESS == esmi_oob_cpuid_eax(soc_num, thread_ind, cpuid_fn,
+                                          cpuid_extd_fn, eax_value))
     {
-       if(OOB_SUCCESS == esmi_oob_cpuid_ebx(soc_num, thread_ind, cpuid_fn, cpuid_extd_fn, ebx_value))
-       {
-          if(OOB_SUCCESS == esmi_oob_cpuid_ecx(soc_num, thread_ind, cpuid_fn, cpuid_extd_fn, ecx_value))
-          {
-             if(OOB_SUCCESS == esmi_oob_cpuid_edx(soc_num, thread_ind, cpuid_fn, cpuid_extd_fn, edx_value))
-             {
-                ret = true;
-             }
-             else
-             {
-                sd_journal_print(LOG_ERR, "Error reading register eax \n");
-             }
-          }
-          else
-          {
-             sd_journal_print(LOG_ERR, "Error reading register ecx \n");
-          }
-       }
-       else
-       {
-          sd_journal_print(LOG_ERR, "Error reading register ebx \n");
-       }
+        if (OOB_SUCCESS == esmi_oob_cpuid_ebx(soc_num, thread_ind, cpuid_fn,
+                                              cpuid_extd_fn, ebx_value))
+        {
+            if (OOB_SUCCESS == esmi_oob_cpuid_ecx(soc_num, thread_ind, cpuid_fn,
+                                                  cpuid_extd_fn, ecx_value))
+            {
+                if (OOB_SUCCESS ==
+                    esmi_oob_cpuid_edx(soc_num, thread_ind, cpuid_fn,
+                                       cpuid_extd_fn, edx_value))
+                {
+                    ret = true;
+                }
+                else
+                {
+                    sd_journal_print(LOG_ERR, "Error reading register eax \n");
+                }
+            }
+            else
+            {
+                sd_journal_print(LOG_ERR, "Error reading register ecx \n");
+            }
+        }
+        else
+        {
+            sd_journal_print(LOG_ERR, "Error reading register ebx \n");
+        }
     }
     else
     {
-       sd_journal_print(LOG_ERR, "Error reading register eax \n");
+        sd_journal_print(LOG_ERR, "Error reading register eax \n");
     }
 
     return ret;
 }
-//get byte value
-u_int8_t  CpuInfo::get_reg_offset_conv(uint32_t reg, uint32_t offset, uint32_t flag)
+// get byte value
+u_int8_t CpuInfo::get_reg_offset_conv(uint32_t reg, uint32_t offset,
+                                      uint32_t flag)
 {
-	return ((reg & flag ) >> offset);
+    return ((reg & flag) >> offset);
 }
-void CpuInfo::set_general_info(uint8_t soc_num)
-{
-    set_cpu_string_value(soc_num, "AMD", "Manufacturer", ASSET_INTERFACE);
-    set_cpu_string_value(soc_num, "AuthenticAMD", "VendorId", CPU_INTERFACE);
 
+void CpuInfo::set_general_info()
+{
+    postToBus([this]() {
+        manufacturer("AMD");
+        vendorId("AuthenticAMD");
+    });
 }
-//Get processor threads per Core and Socket
+
+// Get processor threads per Core and Socket
 void CpuInfo::get_threads_per_core_and_soc(uint8_t soc_num)
 {
     uint32_t threads_per_core, threads_per_soc;
@@ -393,331 +609,112 @@ void CpuInfo::get_threads_per_core_and_soc(uint8_t soc_num)
     oob_status_t ret;
     try
     {
-      ret = esmi_get_threads_per_socket(soc_num, &threads_per_soc);
-      if (ret)
-      {
-        sd_journal_print(LOG_ERR, "esmi_get_threads_per_socket call failed \n");
-      }
-      else
-      {
-        set_cpu_int16_value(soc_num, threads_per_soc, "ThreadCount", CPU_INTERFACE);
-        isthreadcall_pass = true;
-      }
-      usleep(APML_SLEEP);
-
-      ret = esmi_get_threads_per_core(soc_num, &threads_per_core);
-      if (ret)
-      {
-        sd_journal_print(LOG_ERR, "esmi_get_threads_per_core call failed \n");
-      }
-      else
-      {
-        if(isthreadcall_pass)
+        ret = esmi_get_threads_per_socket(soc_num, &threads_per_soc);
+        if (ret)
         {
-          uint32_t TotalCores = threads_per_soc / threads_per_core;
-          set_cpu_int16_value(soc_num, TotalCores, "CoreCount", CPU_INTERFACE);
+            sd_journal_print(LOG_ERR,
+                             "esmi_get_threads_per_socket call failed \n");
         }
-      }
+        else
+        {
+            postToBus([this, threads_per_soc]() {
+                threadCount(threads_per_soc);
+            });
+            isthreadcall_pass = true;
+        }
+        usleep(APML_SLEEP);
+
+        ret = esmi_get_threads_per_core(soc_num, &threads_per_core);
+        if (ret)
+        {
+            sd_journal_print(LOG_ERR,
+                             "esmi_get_threads_per_core call failed \n");
+        }
+        else
+        {
+            if (isthreadcall_pass)
+            {
+                uint32_t TotalCores = threads_per_soc / threads_per_core;
+                postToBus([this, TotalCores]() { coreCount(TotalCores); });
+            }
+        }
     }
     catch (std::exception& e)
     {
-       sd_journal_print(LOG_ERR, "Error getting Thread and Socket \n");
-       return ;
+        sd_journal_print(LOG_ERR, "Error getting Thread and Socket \n");
+        return;
     }
 }
 
 void CpuInfo::get_cpu_base_freq(uint8_t soc_num)
 {
-    uint32_t  buffer, value;
+    uint32_t buffer;
     oob_status_t ret;
     try
     {
-       ret = esmi_oob_read_mailbox(soc_num, READ_BMC_CPU_BASE_FREQUENCY, 0, &buffer);
-       if (ret != OOB_SUCCESS) {
+        ret = esmi_oob_read_mailbox(soc_num, READ_BMC_CPU_BASE_FREQUENCY, 0,
+                                    &buffer);
+        if (ret != OOB_SUCCESS)
+        {
             sd_journal_print(LOG_ERR, "read bmc cpu base freq failed \n");
             return;
-       }
-     }
-     catch (std::exception& e)
-     {
+        }
+    }
+    catch (std::exception& e)
+    {
         sd_journal_print(LOG_ERR, "Error getting CPU Base Freq value \n");
-        return ;
-     }
-     set_cpu_int_value(soc_num, buffer, "MaxSpeedInMhz", CPU_INTERFACE);
+        return;
+    }
+
+    postToBus([this, buffer]() { maxSpeedInMhz(buffer); });
 }
-//Get PPIN then we need to Decode to get Serial Number
+
+// Get PPIN then we need to Decode to get Serial Number
 void CpuInfo::get_ppin_fuse(uint8_t soc_num)
 {
-    uint32_t buffer = 0;
     oob_status_t ret;
     uint64_t data = 0;
-    char cpuid[CMD_BUFF_LEN];
-    int retry = 0;
-    //APML read mail box takes time to init, hence added retry
-    try
-    {
-      while(retry < MAX_RETRY)
-      {
-        // Read lower 32 bit PPIN data$
-        ret = esmi_oob_read_mailbox(soc_num, READ_PPIN_FUSE, LO_WORD_REG, &buffer);
-        if(ret != 0)
-        {
-          sleep(MUX_SLEEP);
-          retry++;
-        }
-        else
-        {
-          break;
-        }
-      }//end of retry
 
-      if (!ret)
-      {
-          data = buffer;
-          // Read higher 32 bit PPIN data
-          ret = esmi_oob_read_mailbox(soc_num, READ_PPIN_FUSE, HI_WORD_REG, &buffer);
-          if (!ret)
-          {
-            data |= ((uint64_t)buffer << 32);
-            sd_journal_print(LOG_INFO, "ppin_fuse data %d", data);
-            //now decode PPIN to get SN
-            decode_PPIN(soc_num, data);
-          }
-      }
-      else
-      {
-          sd_journal_print(LOG_ERR, "Error reading lower 32 PPN value \n");
-      }
-   }
-   catch (std::exception& e)
-   {
-      sd_journal_print(LOG_ERR, "Error getting PPN value \n");
-      return ;
-   }
+    ret = read_ppin_fuse(soc_num, &data);
+    if (ret)
+    {
+        sd_journal_print(LOG_ERR, "Failed to read PPIN fuse data\n");
+    }
+    else
+    {
+        postToBus([this, data]() { id(data); });
+        if(data != 0)
+        {
+            decode_PPIN(data);
+        }
+    }
 }
+
 void CpuInfo::get_microcode_rev(uint8_t soc_num)
 {
     uint32_t ucode;
     oob_status_t ret;
     try
     {
-      ret = esmi_oob_read_mailbox(soc_num, READ_UCODE_REVISION, 0, &ucode);
-      if (ret) {
-          sd_journal_print(LOG_ERR,"Failed to read ucode revision\n");
-          return;
-      }
-      sd_journal_print(LOG_INFO,"|ucode revision  | 0x%-32x |\n", ucode);
-      //set the Dbus value
-      char microid[CMD_BUFF_LEN] = {0};
-      sprintf(microid, "0x%x",ucode);
-      //convert char to string
-      std::string microcode_str(microid);
-      set_cpu_string_value(soc_num, microcode_str, "Microcode", CPU_INTERFACE);
+        ret = esmi_oob_read_mailbox(soc_num, READ_UCODE_REVISION, 0, &ucode);
+        if (ret)
+        {
+            sd_journal_print(LOG_ERR, "Failed to read ucode revision\n");
+            return;
+        }
+        sd_journal_print(LOG_INFO, "|ucode revision  | 0x%-32x |\n", ucode);
+        postToBus([this, ucode]() { microcode(ucode); });
     }
     catch (std::exception& e)
     {
         sd_journal_print(LOG_ERR, "Error getting microcode: %s \n", e.what());
     }
 }
-//get the platform ID
-bool CpuInfo::getNumberOfCpu()
-{
-    FILE *pf;
-    char data[COMMAND_LEN];
-    try
-    {
-       // Setup pipe for reading and execute to get u-boot environment
-       pf = popen(COMMAND_NUM_OF_CPU,"r");
-       if(pf > 0)
-       {   // no error
-          if (fgets(data, COMMAND_LEN , pf) != NULL)
-          {
-             num_of_proc = stoi((std::string)data);
-             sd_journal_print(LOG_INFO, "Number of Cpu %d\n", num_of_proc);
-          }
-          pclose(pf);
-          return true;
-       }
-       else
-       {
-          sd_journal_print(LOG_ERR, "Failed to open command stream \n");
-       }
-    }
-    catch (std::exception& e)
-    {
-      sd_journal_print(LOG_ERR, "Error reading number of cpu %s \n", e.what());
-    }
 
-    return false;
-}
-
-std::string CpuInfo::get_interface(uint8_t enum_val )
-{
-    return enum_str[enum_val];
-}
-//Set the CPU DBus value
-void CpuInfo::set_cpu_string_value(uint8_t soc_num, std::string value, std::string property_name, uint8_t enum_val)
-{
-   try
-   {
-       sd_journal_print(LOG_INFO, "Set the DBUS Property of %s \n", property_name.c_str());
-       sdbusplus::bus::bus bus = sdbusplus::bus::new_default();
-       boost::system::error_code ec;
-       boost::asio::io_context io;
-       auto conn = std::make_shared<sdbusplus::asio::connection>(io);
-       if (soc_num == 0)
-       {
-         conn->async_method_call(
-             [this](boost::system::error_code ec) {
-                 if (ec)
-                 {
-                     sd_journal_print(LOG_ERR, "Failed to set CPU value in dbus interface \n");
-                 }
-             },
-             "xyz.openbmc_project.Inventory.Manager",
-             P0_PATH,
-             "org.freedesktop.DBus.Properties", "Set",
-             get_interface(enum_val), property_name,
-             std::variant<std::string>(value));
-       }
-       else if (soc_num == 1)
-       {
-          conn->async_method_call(
-             [this](boost::system::error_code ec) {
-                 if (ec)
-                 {
-                     sd_journal_print(LOG_ERR, "Failed to set CPU value in dbus interface \n" );
-                 }
-             },
-             "xyz.openbmc_project.Inventory.Manager",
-             P1_PATH,
-             "org.freedesktop.DBus.Properties", "Set",
-             get_interface(enum_val), property_name,
-             std::variant<std::string>(value));
-       }
-   }
-   catch (std::exception& e)
-   {
-      sd_journal_print(LOG_ERR, "Error in setting Dbus : %s \n", e.what());
-   }
-}
-void CpuInfo::set_cpu_int_value(uint8_t soc_num, uint32_t value, std::string property_name, uint8_t enum_val)
-{
-    sd_journal_print(LOG_INFO,"Set the DBUS Property of %s \n", property_name.c_str());
-    sdbusplus::bus::bus bus = sdbusplus::bus::new_default();
-    boost::system::error_code ec;
-    boost::asio::io_context io;
-    auto conn = std::make_shared<sdbusplus::asio::connection>(io);
-    if (soc_num == 0)
-    {
-      conn->async_method_call(
-          [this](boost::system::error_code ec) {
-              if (ec)
-              {
-                  sd_journal_print(LOG_ERR, "Failed to set CPU value in dbus interface \n");
-              }
-          },
-          "xyz.openbmc_project.Inventory.Manager",
-          P0_PATH,
-          "org.freedesktop.DBus.Properties", "Set",
-          get_interface(enum_val), property_name,
-          std::variant<uint32_t>(value));
-    }
-    else if (soc_num == 1)
-    {
-       conn->async_method_call(
-          [this](boost::system::error_code ec) {
-              if (ec)
-              {
-                  sd_journal_print(LOG_ERR, "Failed to set CPU value in dbus interface \n");
-              }
-          },
-          "xyz.openbmc_project.Inventory.Manager",
-          P1_PATH,
-          "org.freedesktop.DBus.Properties", "Set",
-          get_interface(enum_val), property_name,
-          std::variant<uint32_t>(value));
-    }
-}
-
-void CpuInfo::set_cpu_bool_value(uint8_t soc_num, bool value, std::string property_name, uint8_t enum_val)
-{
-    sd_journal_print(LOG_INFO,"Set the DBUS Property of %s \n", property_name.c_str());
-    sdbusplus::bus::bus bus = sdbusplus::bus::new_default();
-    boost::system::error_code ec;
-    boost::asio::io_context io;
-    auto conn = std::make_shared<sdbusplus::asio::connection>(io);
-    if (soc_num == 0)
-    {
-      conn->async_method_call(
-          [this](boost::system::error_code ec) {
-              if (ec)
-              {
-                  sd_journal_print(LOG_ERR, "Failed to set CPU value in dbus interface \n");
-              }
-          },
-          "xyz.openbmc_project.Inventory.Manager",
-          P0_PATH,
-          "org.freedesktop.DBus.Properties", "Set",
-          get_interface(enum_val), property_name,
-          std::variant<bool>(value));
-    }
-    else if (soc_num == 1)
-    {
-       conn->async_method_call(
-          [this](boost::system::error_code ec) {
-              if (ec)
-              {
-                  sd_journal_print(LOG_ERR, "Failed to set CPU value in dbus interface \n");
-              }
-          },
-          "xyz.openbmc_project.Inventory.Manager",
-          P1_PATH,
-          "org.freedesktop.DBus.Properties", "Set",
-          get_interface(enum_val), property_name,
-          std::variant<bool>(value));
-    }
-}
-void CpuInfo::set_cpu_int16_value(uint8_t soc_num, uint16_t value, std::string property_name, uint8_t enum_val)
-{
-    sd_journal_print(LOG_INFO,"Set the DBUS Property of %s \n", property_name.c_str());
-    sdbusplus::bus::bus bus = sdbusplus::bus::new_default();
-    boost::system::error_code ec;
-    boost::asio::io_context io;
-    auto conn = std::make_shared<sdbusplus::asio::connection>(io);
-    if (soc_num == 0)
-    {
-      conn->async_method_call(
-          [this](boost::system::error_code ec) {
-              if (ec)
-              {
-                  sd_journal_print(LOG_ERR, "Failed to set CPU value in dbus interface \n");
-              }
-          },
-          "xyz.openbmc_project.Inventory.Manager",
-          P0_PATH,
-          "org.freedesktop.DBus.Properties", "Set",
-          get_interface(enum_val), property_name,
-          std::variant<uint16_t>(value));
-    }
-    else if (soc_num == 1)
-    {
-       conn->async_method_call(
-          [this](boost::system::error_code ec) {
-              if (ec)
-              {
-                  sd_journal_print(LOG_ERR, "Failed to set CPU value in dbus interface \n");
-              }
-          },
-          "xyz.openbmc_project.Inventory.Manager",
-          P1_PATH,
-          "org.freedesktop.DBus.Properties", "Set",
-          get_interface(enum_val), property_name,
-          std::variant<uint16_t>(value));
-    }
-}
-//function to decode Marking Month - last Digit of making Year and Unit # in lot
-void CpuInfo::decode_datemonth_unitlot(char* ppinstr, std::string& datemonthlotstr)
+// function to decode Marking Month - last Digit of making Year and Unit # in
+// lot
+void CpuInfo::decode_datemonth_unitlot(char* ppinstr,
+                                       std::string& datemonthlotstr)
 {
     std::string ppin_str(ppinstr);
     size_t len = strlen(ppinstr);
@@ -726,11 +723,11 @@ void CpuInfo::decode_datemonth_unitlot(char* ppinstr, std::string& datemonthlots
     std::string lower32ppinstr = ppin_str.substr(offset, LOWER_PINBITS);
     lower32ppinstr = HEX + lower32ppinstr;
 
-    //get upper PPIN
-    std::string upper32ppinstr = ppin_str.substr (0, (len - LOWER_PINBITS));
+    // get upper PPIN
+    std::string upper32ppinstr = ppin_str.substr(0, (len - LOWER_PINBITS));
     upper32ppinstr = HEX + upper32ppinstr;
 
-    //convert hex string to actual number
+    // convert hex string to actual number
     unsigned int upper32ppin;
     std::stringstream ss1;
     ss1 << std::hex << upper32ppinstr;
@@ -741,32 +738,33 @@ void CpuInfo::decode_datemonth_unitlot(char* ppinstr, std::string& datemonthlots
     ss2 << std::hex << lower32ppinstr;
     ss2 >> lower32ppin;
 
-    //Bits 0-13 are Dev Number
-    //mask out all 14 bits
+    // Bits 0-13 are Dev Number
+    // mask out all 14 bits
     int devnum = (lower32ppin & MASKNO_14BITS);
-    //add leading zeros to the string if less then 4 digit
+    // add leading zeros to the string if less then 4 digit
     std::string devnumstr = std::to_string(devnum);
     std::ostringstream ss3;
     ss3 << std::setw(DEV_LENGTH) << std::setfill('0') << devnumstr;
     devnumstr = ss3.str();
 
-    //Bits 14-20 are Month/Year
+    // Bits 14-20 are Month/Year
     int datecode = (lower32ppin & MASKNO_MON_YEAR);
-        datecode = (datecode >> DATECODE_SHIFT);
+    datecode = (datecode >> DATECODE_SHIFT);
 
     int month = (datecode / MONTH_VAL);
-        month = month + 1;
+    month = month + 1;
 
-    int year = datecode  % MONTH_VAL;
+    int year = datecode % MONTH_VAL;
     std::string monthstr = "";
-    if(months_map.find(month) != months_map.end())
+    if (months_map.find(month) != months_map.end())
     {
-       monthstr = months_map.find(month)->second;
+        monthstr = months_map.find(month)->second;
     }
 
     datemonthlotstr = monthstr + std::to_string(year) + devnumstr;
 }
-//decode marked lot number char length is 7 -Fuse/mak lot #
+
+// decode marked lot number char length is 7 -Fuse/mak lot #
 void CpuInfo::decode_lotstring(char* ppinstr, std::string& markedlotstr)
 {
     std::string ppin_str(ppinstr);
@@ -775,79 +773,68 @@ void CpuInfo::decode_lotstring(char* ppinstr, std::string& markedlotstr)
     uint64_t converter_num;
     uint64_t decodechar_num;
 
-    //convert hex string to actual number
+    // convert hex string to actual number
     std::string ppin_hexstr = HEX + ppin_str;
     std::stringstream ss;
     ss << std::hex << ppin_hexstr;
     ss >> full64ppin;
 
-    //Bits 21-57 are Marked Lot Number
+    // Bits 21-57 are Marked Lot Number
     markedlot = full64ppin >> LOTNUM_SHIFT;
 
     converter_num = markedlot;
     char currentchar[CMD_BUFF_LEN] = {0};
 
-    //Now convert Marked Lot through Alpha Numeric 37 decoding
-    //marked lot is 7 char string
+    // Now convert Marked Lot through Alpha Numeric 37 decoding
+    // marked lot is 7 char string
     for (int i = 0; i < LOTNUM_LENGTH; i++)
     {
-       decodechar_num = converter_num % MAX_ALPHA_NUM;
-       converter_num = converter_num / MAX_ALPHA_NUM;
-       if (decodechar_num < MAX_ALPHA_LENGTH)
-       {
-           decodechar_num = decodechar_num + ALPHA_CHAR_CONVER_VAL;
-           currentchar[i] = decodechar_num;
-       }
-       else
-       {
-           decodechar_num = decodechar_num + DIGIT_CONVER_VAL;
-           currentchar[i] = decodechar_num;
-       }
+        decodechar_num = converter_num % MAX_ALPHA_NUM;
+        converter_num = converter_num / MAX_ALPHA_NUM;
+        if (decodechar_num < MAX_ALPHA_LENGTH)
+        {
+            decodechar_num = decodechar_num + ALPHA_CHAR_CONVER_VAL;
+            currentchar[i] = decodechar_num;
+        }
+        else
+        {
+            decodechar_num = decodechar_num + DIGIT_CONVER_VAL;
+            currentchar[i] = decodechar_num;
+        }
     }
-    //reverse the char buffer to get lot number
+    // reverse the char buffer to get lot number
     int len, temp, itrlen;
     len = strlen(currentchar);
     itrlen = len / LENGTH_DIV;
-    for(int i = 0; i < itrlen; i++)
+    for (int i = 0; i < itrlen; i++)
     {
-       temp = currentchar[i];
-       currentchar[i] = currentchar[len - i - 1];
-       currentchar[len - i - 1] = temp;
+        temp = currentchar[i];
+        currentchar[i] = currentchar[len - i - 1];
+        currentchar[len - i - 1] = temp;
     }
     markedlotstr = currentchar;
 }
-//decode PPIN to get SN
-void CpuInfo::decode_PPIN(uint8_t soc_num, uint64_t data)
+
+// decode PPIN to get SN
+void CpuInfo::decode_PPIN(uint64_t data)
 {
     char ppinstr[CMD_BUFF_LEN] = {0};
-    char setppinstr[CMD_BUFF_LEN] = {0};
     std::string markedlotstr;
     std::string datemonthlotstr;
     std::string serialnumstr;
 
-    sprintf(setppinstr, "0x%llx", data);
-    sd_journal_print(LOG_INFO, "PPIN Fuse : %s \n", setppinstr);
-    //convert char to string
-    std::string setppinstr_str(setppinstr);
-    set_cpu_string_value(soc_num, setppinstr_str, "PPIN", CPU_INTERFACE);
-
-    sprintf(ppinstr, "0%llx", data);
+    sprintf(ppinstr, "0%lx", data);
     decode_lotstring(ppinstr, markedlotstr);
     sd_journal_print(LOG_INFO, "Mark Lot string # %s \n", markedlotstr.c_str());
 
     decode_datemonth_unitlot(ppinstr, datemonthlotstr);
-    sd_journal_print(LOG_INFO, "Month:Year:#Unitlot %s \n", datemonthlotstr.c_str());
+    sd_journal_print(LOG_INFO, "Month:Year:#Unitlot %s \n",
+                     datemonthlotstr.c_str());
 
-    //serial Number = lotstring + month + year + devnum
+    // serial Number = lotstring + month + year + devnum
     serialnumstr = markedlotstr + datemonthlotstr;
 
-    //now convert string to Char buffer to set in DBus
-    char serialnum_buffer[serialnumstr.length() + 1];
-    strcpy(serialnum_buffer, serialnumstr.c_str());
-
-    //set the Dbus property
-    std::string serialnum_buffer_str(serialnum_buffer);
-    set_cpu_string_value(soc_num, serialnum_buffer_str, "SerialNumber", ASSET_INTERFACE);
+    postToBus([this, serialnumstr]() { serialNumber(serialnumstr); });
 
     return;
 }
