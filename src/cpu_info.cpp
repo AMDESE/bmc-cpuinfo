@@ -162,9 +162,46 @@ int EventLoopDispatcher::onEvent(sd_event_source* /*source*/, int fd,
     return 0;
 }
 
+// POST complete: FRB2 watchdog disabled. Main thread only.
+bool CpuInfo::isBiosPostComplete()
+{
+    try
+    {
+        auto getProp = [this](const char* property) {
+            auto method = bus.new_method_call(
+                cpuinfoDataHolderObj->WatchdogService,
+                cpuinfoDataHolderObj->WatchdogPath,
+                cpuinfoDataHolderObj->PropertiesIntf, "Get");
+            method.append(cpuinfoDataHolderObj->WatchdogIntf, property);
+            std::variant<bool, std::string> value;
+            bus.call(method).read(value);
+            return value;
+        };
+
+        auto enabled = getProp("Enabled");
+        const bool* isEnabled = std::get_if<bool>(&enabled);
+        if (isEnabled == nullptr || *isEnabled)
+        {
+            return false;
+        }
+
+        auto timerUse = getProp("CurrentTimerUse");
+        const auto* use = std::get_if<std::string>(&timerUse);
+        return use && *use == cpuinfoDataHolderObj->WatchdogTimerUseBiosFrb2;
+    }
+    catch (const std::exception& e)
+    {
+        sd_journal_print(LOG_DEBUG, "Watchdog state read failed: %s \n",
+                         e.what());
+        return false;
+    }
+}
+
 // Init CPU Information using OOB library
 void CpuInfo::collect_cpu_information(uint8_t soc_num)
 {
+    std::lock_guard<std::mutex> lock(collectMutex);
+
     if (connect_apml_get_family_model_step(soc_num))
     {
         set_general_info();
@@ -604,8 +641,8 @@ void CpuInfo::set_general_info()
 // Get processor threads per Core and Socket
 void CpuInfo::get_threads_per_core_and_soc(uint8_t soc_num)
 {
-    uint32_t threads_per_core, threads_per_soc;
-    bool isthreadcall_pass;
+    uint32_t threads_per_core = 0, threads_per_soc = 0;
+    bool isthreadcall_pass = false;
     oob_status_t ret;
     try
     {
@@ -632,7 +669,7 @@ void CpuInfo::get_threads_per_core_and_soc(uint8_t soc_num)
         }
         else
         {
-            if (isthreadcall_pass)
+            if (isthreadcall_pass && threads_per_core > 0)
             {
                 uint32_t TotalCores = threads_per_soc / threads_per_core;
                 postToBus([this, TotalCores]() { coreCount(TotalCores); });
