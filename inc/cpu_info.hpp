@@ -58,6 +58,15 @@ class CpuInfoDataHolder
         "org.freedesktop.DBus.Properties";
     const static constexpr char* HostStatePathPrefix =
         "/xyz/openbmc_project/state/host0";
+    // BIOS POST complete: FRB2 watchdog disabled (same as amd-ras)
+    const static constexpr char* WatchdogService =
+        "xyz.openbmc_project.Watchdog0";
+    const static constexpr char* WatchdogPath =
+        "/xyz/openbmc_project/watchdog/host0";
+    const static constexpr char* WatchdogIntf =
+        "xyz.openbmc_project.State.Watchdog";
+    const static constexpr char* WatchdogTimerUseBiosFrb2 =
+        "xyz.openbmc_project.State.Watchdog.TimerUse.BIOSFRB2";
 };
 
 struct EventDeleter
@@ -172,9 +181,58 @@ struct CpuInfo :
                         }
                     }
                 }
+            }),
+        // Re-read on BIOS POST complete; counts read earlier may be partial
+        watchdogStateMatch(
+            bus,
+            sdbusplus::bus::match::rules::propertiesChanged(
+                cpuinfoDataHolderObj->WatchdogPath,
+                cpuinfoDataHolderObj->WatchdogIntf),
+            [this, soc_num](sdbusplus::message::message& msg) {
+                try
+                {
+                    std::string interfaceName;
+                    std::map<std::string,
+                             std::variant<bool, uint64_t, std::string>>
+                        msgData;
+                    msg.read(interfaceName, msgData);
+                    auto it = msgData.find("Enabled");
+                    if (it == msgData.end())
+                    {
+                        return;
+                    }
+                    const bool* enabled = std::get_if<bool>(&it->second);
+                    if (enabled == nullptr || *enabled)
+                    {
+                        return;
+                    }
+                    if (isBiosPostComplete())
+                    {
+                        sd_journal_print(
+                            LOG_INFO,
+                            "Socket %d: BIOS post complete, refreshing CPU info \n",
+                            soc_num);
+                        std::thread([this, soc_num]() {
+                            collect_cpu_information(soc_num);
+                        }).detach();
+                    }
+                }
+                catch (const std::exception& e)
+                {
+                    sd_journal_print(LOG_ERR,
+                                     "Failed to handle watchdog change: %s \n",
+                                     e.what());
+                }
             })
     {
         sd_journal_print(LOG_DEBUG, "cpu service start... \n");
+        if (isBiosPostComplete())
+        {
+            sd_journal_print(
+                LOG_INFO,
+                "Socket %d: BIOS post already complete, reading CPU info now \n",
+                soc_num);
+        }
         std::thread([this, soc_num]() {
             collect_cpu_information(soc_num);
         }).detach();
@@ -185,8 +243,14 @@ struct CpuInfo :
     sdbusplus::bus::bus& bus;
     uint8_t soc_num;
     EventLoopDispatcher* dispatcher;
+    // Serialise overlapping collections for this socket
+    std::mutex collectMutex;
     sdbusplus::bus::match_t propertiesChangedSignalCurrentHostState;
+    sdbusplus::bus::match_t watchdogStateMatch;
     std::string get_interface(uint8_t enum_val);
+
+    // Main thread only
+    bool isBiosPostComplete();
 
     // Run a D-Bus property setter (or any bus access) on the event-loop
     // thread. Called from worker threads to keep all sd-bus access on a
